@@ -1,5 +1,11 @@
 # 更新日志
 
+## 0.2.1
+
+- 单独记录上游返回的空模型结果（`content=None`、无 reasoning、无 tool_calls），不再把它误判为请求中的空 assistant。
+- 状态和 dump 增加空模型结果的次数、错误摘要、响应 ID、结束原因和 token 用量摘要。
+- 对非流式 OpenAI completion 保存精简响应摘要，帮助区分 Kimi/TokenRouter 返回异常与本地请求上下文问题。
+
 ## 0.2.0
 
 - 增加 request hook 级别的上下文前后快照，记录具体插件 handler 修改了哪些消息。

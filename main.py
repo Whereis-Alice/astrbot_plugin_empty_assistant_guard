@@ -20,7 +20,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.2.1"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -118,6 +118,9 @@ class AuditState:
     wire_request_count: int = 0
     wire_bad_count: int = 0
     wire_message_count: int = 0
+    empty_output_count: int = 0
+    last_empty_output: str = ""
+    last_empty_output_response: str = ""
 
 
 class TrackedRequestList(list[Any]):
@@ -547,6 +550,50 @@ class EmptyAssistantGuardPlugin(Star):
                 phase="provider_http_request",
                 before_messages=messages,
             )
+
+    def on_provider_empty_output(
+        self,
+        provider: Any,
+        error: Exception,
+        payloads: dict[str, Any] | None = None,
+        response_summary: dict[str, Any] | None = None,
+    ) -> None:
+        """Record an upstream completion with no usable assistant output."""
+        if not self._cfg_bool("enabled", True) or not self._is_empty_model_output_error(error):
+            return
+
+        state = self._state_for_provider(provider) or self._latest_state()
+        if state is None:
+            return
+
+        request_payloads = payloads or {}
+        state.provider_model = str(request_payloads.get("model") or state.provider_model)
+        state.empty_output_count += 1
+        state.last_empty_output = str(error)
+        if response_summary:
+            state.last_empty_output_response = self._preview_text(
+                self._safe_json(response_summary),
+                limit=1400,
+            )
+
+        self._append_dump_event(
+            state,
+            "provider_empty_output",
+            {
+                "error": str(error),
+                "model": state.provider_model,
+                "response": response_summary or {},
+            },
+        )
+        self._remember_state(state)
+        logger.warning(
+            "[%s] upstream returned an empty model output; this is distinct from an "
+            "empty assistant in the request; model=%s response=%s dump=%s",
+            PLUGIN_ID,
+            state.provider_model or PREVIEW_FALLBACK,
+            self._preview_text(self._safe_json(response_summary or {}), limit=700),
+            state.dump_dir,
+        )
 
     def _snapshot_request_contexts(self, req: Any) -> list[dict[str, Any]]:
         contexts = getattr(req, "contexts", []) or []
@@ -1255,13 +1302,18 @@ class EmptyAssistantGuardPlugin(Star):
     def _state_has_problem(self, state: AuditState) -> bool:
         return bool(
             state.provider_error
+            or state.empty_output_count > 0
             or state.blocked
             or state.repairs
             or any(phase.bad_count > 0 for phase in state.phases)
         )
 
     def _state_has_provider_error(self, state: AuditState) -> bool:
-        return bool(state.provider_error or state.provider_error_count > 0)
+        return bool(
+            state.provider_error
+            or state.provider_error_count > 0
+            or state.empty_output_count > 0
+        )
 
     def _status_model_keywords(self) -> list[str]:
         raw = self._cfg_str("status_model_keywords", "kimi,moonshot")
@@ -1329,6 +1381,45 @@ class EmptyAssistantGuardPlugin(Star):
             "assistant messages must contain text" in text
             and "tool_calls" in text
         )
+
+    def _is_empty_model_output_error(self, error: Exception) -> bool:
+        text = str(error).lower()
+        return (
+            type(error).__name__ == "EmptyModelOutputError"
+            or "openai completion has no usable output" in text
+        )
+
+    def _completion_summary(self, completion: Any) -> dict[str, Any]:
+        """Keep response metadata without dumping the full provider response."""
+        def get_value(value: Any, key: str, default: Any = None) -> Any:
+            if isinstance(value, dict):
+                return value.get(key, default)
+            return getattr(value, key, default)
+
+        choices = get_value(completion, "choices", []) or []
+        choice = choices[0] if choices else None
+        message = get_value(choice, "message", None)
+        usage = get_value(completion, "usage", None)
+        return {
+            "id": get_value(completion, "id", ""),
+            "model": get_value(completion, "model", ""),
+            "choices": len(choices),
+            "finish_reason": get_value(choice, "finish_reason", ""),
+            "stop_reason": get_value(choice, "stop_reason", ""),
+            "content": self._preview_value(get_value(message, "content", None), limit=300),
+            "reasoning_content": self._preview_value(
+                get_value(message, "reasoning_content", None),
+                limit=300,
+            ),
+            "tool_calls": self._preview_value(get_value(message, "tool_calls", None), limit=500),
+            "function_call": self._preview_value(
+                get_value(message, "function_call", None),
+                limit=300,
+            ),
+            "prompt_tokens": get_value(usage, "prompt_tokens", None),
+            "completion_tokens": get_value(usage, "completion_tokens", None),
+            "total_tokens": get_value(usage, "total_tokens", None),
+        }
 
     def _find_bad_assistant_messages(self, messages: Any) -> list[MessageFinding]:
         if not isinstance(messages, list):
@@ -1714,16 +1805,28 @@ class EmptyAssistantGuardPlugin(Star):
                 f"{source} x{count}" for source, count in top
             )
 
+        empty_output_hint = ""
+        if state.empty_output_count:
+            empty_output_hint = (
+                "upstream returned an empty model output after the request; "
+                "inspect Kimi/TokenRouter response conversion and context size"
+            )
+
         if state.wire_request_count and state.provider_error:
             if state.wire_bad_count:
-                return (
+                request_hint = (
                     "empty assistant was still present immediately before the OpenAI client; "
                     "inspect hook_context_diff and provider_http_payload"
                 )
-            return (
-                "final OpenAI client payload had no detectable empty assistant; "
-                "inspect TokenRouter/OpenAI serialization or upstream transformation"
-            )
+            else:
+                request_hint = (
+                    "final OpenAI client payload had no detectable empty assistant; "
+                    "inspect TokenRouter/OpenAI serialization or upstream transformation"
+                )
+            return "; ".join(item for item in (empty_output_hint, request_hint) if item)
+
+        if empty_output_hint:
+            return empty_output_hint
 
         mutation_sources = [item.source for item in state.mutations]
         if mutation_sources:
@@ -1769,6 +1872,16 @@ class EmptyAssistantGuardPlugin(Star):
         if state.provider_error:
             lines.append(f"provider_error_count: {state.provider_error_count}")
             lines.append(f"last_provider_error: {self._preview_text(state.provider_error, limit=1000)}")
+        if state.empty_output_count:
+            lines.append(f"empty_output_count: {state.empty_output_count}")
+            lines.append(
+                f"last_empty_output: {self._preview_text(state.last_empty_output, limit=1000)}"
+            )
+            if state.last_empty_output_response:
+                lines.append(
+                    "empty_output_response: "
+                    f"{self._preview_text(state.last_empty_output_response, limit=1400)}"
+                )
         if state.wire_request_count:
             lines.append(
                 "wire_payload: "
@@ -1941,6 +2054,21 @@ class EmptyAssistantGuardPlugin(Star):
                     _HTTP_PROVIDER_BY_CLIENT[id(client)] = provider
             try:
                 return await _PATCH_ORIGINALS["_query"](provider, *args, **kwargs)
+            except Exception as exc:
+                plugin = _ACTIVE_PLUGIN
+                if plugin is not None:
+                    payloads = (
+                        args[0]
+                        if args and isinstance(args[0], dict)
+                        else kwargs.get("payloads")
+                    )
+                    plugin.on_provider_empty_output(
+                        provider,
+                        exc,
+                        payloads,
+                        getattr(provider, f"_{PLUGIN_ID}_last_completion_summary", None),
+                    )
+                raise
             finally:
                 if completions is not None:
                     _HTTP_PROVIDER_BY_COMPLETIONS.pop(id(completions), None)
@@ -1962,6 +2090,16 @@ class EmptyAssistantGuardPlugin(Star):
             try:
                 async for chunk in _PATCH_ORIGINALS["_query_stream"](provider, *args, **kwargs):
                     yield chunk
+            except Exception as exc:
+                plugin = _ACTIVE_PLUGIN
+                if plugin is not None:
+                    payloads = (
+                        args[0]
+                        if args and isinstance(args[0], dict)
+                        else kwargs.get("payloads")
+                    )
+                    plugin.on_provider_empty_output(provider, exc, payloads)
+                raise
             finally:
                 if completions is not None:
                     _HTTP_PROVIDER_BY_COMPLETIONS.pop(id(completions), None)
@@ -2056,12 +2194,24 @@ class EmptyAssistantGuardPlugin(Star):
                         id(getattr(completions, "_client", None))
                     )
                 if plugin is not None and provider is not None:
+                    setattr(provider, f"_{PLUGIN_ID}_last_completion_summary", None)
                     plugin.on_provider_http_payload(provider, kwargs)
-                return await _PATCH_ORIGINALS["AsyncCompletions.create"](
+                result = await _PATCH_ORIGINALS["AsyncCompletions.create"](
                     completions,
                     *args,
                     **kwargs,
                 )
+                if (
+                    plugin is not None
+                    and provider is not None
+                    and not kwargs.get("stream", False)
+                ):
+                    setattr(
+                        provider,
+                        f"_{PLUGIN_ID}_last_completion_summary",
+                        plugin._completion_summary(result),
+                    )
+                return result
 
             AsyncCompletions.create = completions_create_wrapper
             _PATCH_WRAPPERS["AsyncCompletions.create"] = completions_create_wrapper

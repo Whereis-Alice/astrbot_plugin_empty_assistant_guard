@@ -62,6 +62,8 @@ recent_request_limit = 20
 
 `capture_hook_diffs` 默认开启，会逐个记录 `OnLLMRequestEvent` handler 前后的 `ProviderRequest.contexts` 差异，并在最终调用 OpenAI 客户端前记录消息摘要。若 `source_hint` 显示某个 handler 首次引入空 assistant，优先检查该插件；若最终客户端 payload 仍干净但 Kimi 继续报错，问题更可能发生在 OpenAI SDK、TokenRouter 或上游转换层。
 
+如果 AstrBot 报告 `OpenAI completion has no usable output`，这是上游返回了空模型结果，不等同于请求中的空 assistant。状态命令会额外显示 `empty_output_count`、`last_empty_output` 和 `empty_output_response`，其中包含响应 ID、结束原因和 token 用量摘要。此类问题优先检查 TokenRouter/Kimi 转换层和上下文长度，不要继续增加 `fallback_repair_max_attempts`。
+
 如果上游已经把异常消息清理掉，但仍返回明确的 `Assistant messages must contain text, reasoning content, or tool_calls.`，默认的 `fallback_repair_on_unmatched_api_error` 会在本次请求重试前逐次删除请求副本中的最近一条 `assistant`，并删除其后紧邻的孤立 `tool`。`fallback_repair_max_attempts` 默认最多尝试 3 次，达到上限后停止，不会修改已保存的正常会话历史；关闭第一个选项即可停用这个兜底。
 
 升级插件不会覆盖 AstrBot 已保存的旧配置。如果状态中仍显示 `provider_action: report_only`，请在插件配置中手动改成 `repair`，否则插件只记录问题，不会自动修复。
