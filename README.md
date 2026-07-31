@@ -67,6 +67,8 @@ recent_request_limit = 20
 
 `capture_hook_diffs` 默认开启，会逐个记录 `OnLLMRequestEvent` handler 前后的 `ProviderRequest.contexts` 差异。`capture_serialized_http_payload` 默认开启，会在 OpenAI SDK 完成 JSON 序列化、HTTPX 发送前记录消息摘要、请求字段、请求体大小和 SHA-256 短哈希，不记录完整请求体或 API Key。若 `source_hint` 显示某个 handler 首次引入空 assistant，优先检查该插件；若 `provider_http_serialized_payload` 仍干净但 Kimi 继续报错，问题发生在 HTTP 请求之后，更可能是 TokenRouter 或上游转换层。
 
+序列化观测在 `0.2.6` 起放到后台线程与 HTTP 请求并行执行，避免几百个工具的请求被诊断日志拖慢。
+
 如果 AstrBot 报告 `OpenAI completion has no usable output`，这是上游返回了空模型结果，不等同于请求中的空 assistant。状态命令会额外显示 `empty_output_count`、`last_empty_output` 和 `empty_output_response`，其中包含响应 ID、结束原因和 token 用量摘要。此类问题优先检查 TokenRouter/Kimi 转换层和上下文长度，不要继续增加 `fallback_repair_max_attempts`。
 
 当日志显示 `bad_messages=0` 但仍匹配到空 assistant 400 时，0.2.2 默认不会再删除最近的正常 assistant 并反复重试。`fallback_repair_when_wire_payload_clean` 仅用于针对 TokenRouter 序列化问题做实验，普通使用应保持关闭。

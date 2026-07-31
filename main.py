@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import time
+import asyncio
 from collections.abc import Iterable
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
@@ -21,7 +22,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.2.5"
+PLUGIN_VERSION = "0.2.6"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -2471,18 +2472,46 @@ class EmptyAssistantGuardPlugin(Star):
             ) -> Any:
                 plugin = _ACTIVE_PLUGIN
                 provider = _HTTP_PROVIDER_BY_CLIENT.get(id(api_client))
+                capture_task = None
                 if (
                     plugin is not None
                     and provider is not None
                     and plugin._cfg_bool("capture_serialized_http_payload", True)
                 ):
-                    plugin.on_provider_serialized_http_payload(provider, request)
-                return await original_send_request(
-                    api_client,
-                    request,
-                    stream=stream,
-                    **kwargs,
-                )
+                    async def capture_serialized_payload() -> None:
+                        try:
+                            await asyncio.to_thread(
+                                plugin.on_provider_serialized_http_payload,
+                                provider,
+                                request,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "[%s] serialized HTTP payload capture failed: %s",
+                                PLUGIN_ID,
+                                exc,
+                            )
+
+                    capture_task = asyncio.create_task(capture_serialized_payload())
+
+                try:
+                    return await original_send_request(
+                        api_client,
+                        request,
+                        stream=stream,
+                        **kwargs,
+                    )
+                except BaseException:
+                    if capture_task is not None:
+                        try:
+                            await asyncio.wait_for(capture_task, timeout=1.0)
+                        except asyncio.TimeoutError:
+                            logger.debug(
+                                "[%s] serialized HTTP payload capture exceeded 1 second "
+                                "while propagating provider error",
+                                PLUGIN_ID,
+                            )
+                    raise
 
             AsyncAPIClient._send_request = send_request_wrapper
             _PATCH_WRAPPERS["AsyncAPIClient._send_request"] = send_request_wrapper
