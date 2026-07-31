@@ -11,6 +11,12 @@
     "hint": "开启后会轻量 patch ProviderOpenAIOfficial，在请求上游前检查 payloads.messages。",
     "default": true
   },
+  "patch_agent_runner": {
+    "type": "bool",
+    "description": "在 Agent Runner 发送前兜底清理上下文",
+    "hint": "建议开启。它会在 ToolLoopAgentRunner 每次调用模型前清理 run_context.messages，并阻止核心把空 assistant 写回历史。",
+    "default": true
+  },
   "provider_action": {
     "type": "string",
     "description": "发现空 assistant 后的处理方式",

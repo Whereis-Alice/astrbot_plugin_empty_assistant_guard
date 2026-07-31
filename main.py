@@ -20,7 +20,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.1.1"
+PLUGIN_VERSION = "0.1.2"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -187,6 +187,8 @@ class EmptyAssistantGuardPlugin(Star):
         self._set_active()
         if self._cfg_bool("patch_openai_provider", True):
             self._apply_provider_patches()
+        if self._cfg_bool("patch_agent_runner", True):
+            self._apply_runner_patches()
         logger.info("[%s] initialized", PLUGIN_ID)
 
     async def terminate(self) -> None:
@@ -412,6 +414,109 @@ class EmptyAssistantGuardPlugin(Star):
         )
         state.mutations.append(record)
         self._append_dump_event(state, "request_assignment", asdict(record))
+
+    def sanitize_runner_contexts(
+        self,
+        runner: Any,
+        contexts: Any,
+    ) -> Any:
+        if not self._cfg_bool("enabled", True):
+            return contexts
+
+        context_list = list(contexts or [])
+        findings = self._find_bad_assistant_messages(context_list)
+        if not findings:
+            return contexts
+
+        state = self._state_for_runner(runner)
+        provider_id = self._runner_provider_id(runner)
+        if state is not None:
+            state.provider_model = provider_id or state.provider_model
+            self._record_phase(state, "runner_contexts_before_provider", context_list)
+
+        action = self._provider_action()
+        if action not in {"repair", "fix"}:
+            logger.warning(
+                "[%s] runner contexts contain %s empty assistant message(s), but provider_action=%s provider=%s",
+                PLUGIN_ID,
+                len(findings),
+                action,
+                provider_id or PREVIEW_FALLBACK,
+            )
+            return contexts
+
+        repaired_messages, changes = self._repair_payload_messages(
+            context_list,
+            strategy=self._cfg_str("repair_strategy", "drop").strip().lower(),
+        )
+        if not changes:
+            return contexts
+
+        if state is not None:
+            repair = RepairRecord(
+                phase="runner_contexts_before_provider",
+                action="repair:runner_contexts",
+                before_messages=len(context_list),
+                after_messages=len(repaired_messages),
+                changes=changes,
+            )
+            state.repairs.append(repair)
+            self._append_dump_event(state, "runner_contexts_repair", asdict(repair))
+            self._record_phase(state, "runner_contexts_repaired", repaired_messages)
+            self._remember_state(state)
+
+        logger.warning(
+            "[%s] repaired runner contexts before provider=%s: before=%s after=%s changes=%s",
+            PLUGIN_ID,
+            provider_id or PREVIEW_FALLBACK,
+            len(context_list),
+            len(repaired_messages),
+            " | ".join(changes),
+        )
+        return repaired_messages
+
+    async def cleanup_runner_after_complete(
+        self,
+        runner: Any,
+        before_count: int,
+    ) -> None:
+        if not self._cfg_bool("enabled", True):
+            return
+        messages = getattr(getattr(runner, "run_context", None), "messages", None)
+        if not isinstance(messages, list) or len(messages) <= before_count:
+            return
+
+        removed = 0
+        while len(messages) > before_count:
+            last = messages[-1]
+            if not self._is_bad_assistant_message(self._ensure_message_dict(last)):
+                break
+            messages.pop()
+            removed += 1
+
+        if not removed:
+            return
+
+        state = self._state_for_runner(runner)
+        provider_id = self._runner_provider_id(runner)
+        if state is not None:
+            repair = RepairRecord(
+                phase="runner_complete",
+                action="remove_empty_assistant_append",
+                before_messages=before_count + removed,
+                after_messages=before_count,
+                changes=[f"removed {removed} empty assistant message(s) appended by runner"],
+            )
+            state.repairs.append(repair)
+            self._append_dump_event(state, "runner_complete_repair", asdict(repair))
+            self._remember_state(state)
+
+        logger.warning(
+            "[%s] removed %s empty assistant message(s) appended by ToolLoopAgentRunner provider=%s",
+            PLUGIN_ID,
+            removed,
+            provider_id or PREVIEW_FALLBACK,
+        )
 
     def on_provider_payload_prepared(
         self,
@@ -674,6 +779,30 @@ class EmptyAssistantGuardPlugin(Star):
             last_key = next(reversed(self._last_state_by_umo))
             return self._last_state_by_umo.get(last_key)
         return None
+
+    def _state_for_runner(self, runner: Any) -> AuditState | None:
+        req = getattr(runner, "req", None)
+        session_id = self._session_key(getattr(req, "session_id", "") or "")
+        if session_id:
+            state = self._last_state_by_session.get(session_id)
+            if state is not None:
+                return state
+        event = getattr(getattr(getattr(runner, "run_context", None), "context", None), "event", None)
+        umo = getattr(event, "unified_msg_origin", "")
+        if umo:
+            return self._last_state_by_umo.get(str(umo))
+        return self._latest_state()
+
+    def _runner_provider_id(self, runner: Any) -> str:
+        provider = getattr(runner, "provider", None)
+        provider_config = getattr(provider, "provider_config", None)
+        if isinstance(provider_config, dict):
+            value = provider_config.get("id") or provider_config.get("model")
+            if value:
+                return str(value)
+        req = getattr(runner, "req", None)
+        value = getattr(req, "model", "")
+        return str(value or "")
 
     def _latest_state(self) -> AuditState | None:
         if not self._last_state_by_umo:
@@ -1077,11 +1206,17 @@ class EmptyAssistantGuardPlugin(Star):
         last_phase = state.phases[-1] if state.phases else None
         lines = [
             "EmptyAssistantGuard",
+            f"version: {PLUGIN_VERSION}",
             f"request_id: {state.request_id}",
             f"model: {state.provider_model or PREVIEW_FALLBACK}",
             f"last_phase: {(last_phase.phase if last_phase else PREVIEW_FALLBACK)}",
             f"bad_messages: {(latest_bad.bad_count if latest_bad else 0)}",
             f"provider_action: {state.provider_action}",
+            (
+                "patches: "
+                f"runner={self._cfg_bool('patch_agent_runner', True)}, "
+                f"openai_provider={self._cfg_bool('patch_openai_provider', True)}"
+            ),
             f"source_hint: {self._source_hint(state)}",
         ]
         if latest_bad:
@@ -1244,11 +1379,66 @@ class EmptyAssistantGuardPlugin(Star):
         _PATCHED = True
         logger.info("[%s] patched ProviderOpenAIOfficial", PLUGIN_ID)
 
-    def _restore_provider_patches(self) -> None:
-        global _PATCHED
-        if not _PATCHED:
+    def _apply_runner_patches(self) -> None:
+        try:
+            from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
+        except Exception as exc:
+            logger.warning("[%s] failed to patch ToolLoopAgentRunner: %s", PLUGIN_ID, exc)
             return
 
+        if "ToolLoopAgentRunner" not in _PATCH_CLASSES:
+            _PATCH_CLASSES["ToolLoopAgentRunner"] = ToolLoopAgentRunner
+
+        if "_runner_sanitize_contexts_for_provider" not in _PATCH_ORIGINALS:
+            _PATCH_ORIGINALS["_runner_sanitize_contexts_for_provider"] = (
+                ToolLoopAgentRunner._sanitize_contexts_for_provider
+            )
+
+            def sanitize_contexts_for_provider_wrapper(runner: Any, contexts: Any) -> Any:
+                sanitized = _PATCH_ORIGINALS["_runner_sanitize_contexts_for_provider"](
+                    runner,
+                    contexts,
+                )
+                plugin = _ACTIVE_PLUGIN
+                if plugin is None:
+                    return sanitized
+                return plugin.sanitize_runner_contexts(runner, sanitized)
+
+            ToolLoopAgentRunner._sanitize_contexts_for_provider = sanitize_contexts_for_provider_wrapper
+            _PATCH_WRAPPERS["_runner_sanitize_contexts_for_provider"] = (
+                sanitize_contexts_for_provider_wrapper
+            )
+
+        if "_runner_complete_with_assistant_response" not in _PATCH_ORIGINALS:
+            _PATCH_ORIGINALS["_runner_complete_with_assistant_response"] = (
+                ToolLoopAgentRunner._complete_with_assistant_response
+            )
+
+            async def complete_with_assistant_response_wrapper(
+                runner: Any,
+                llm_resp: Any,
+            ) -> None:
+                messages = getattr(getattr(runner, "run_context", None), "messages", None)
+                before_count = len(messages) if isinstance(messages, list) else 0
+                await _PATCH_ORIGINALS["_runner_complete_with_assistant_response"](
+                    runner,
+                    llm_resp,
+                )
+                plugin = _ACTIVE_PLUGIN
+                if plugin is not None:
+                    await plugin.cleanup_runner_after_complete(runner, before_count)
+
+            ToolLoopAgentRunner._complete_with_assistant_response = (
+                complete_with_assistant_response_wrapper
+            )
+            _PATCH_WRAPPERS["_runner_complete_with_assistant_response"] = (
+                complete_with_assistant_response_wrapper
+            )
+
+        logger.info("[%s] patched ToolLoopAgentRunner", PLUGIN_ID)
+
+    def _restore_provider_patches(self) -> None:
+        global _PATCHED
         provider_cls = _PATCH_CLASSES.get("ProviderOpenAIOfficial")
         if provider_cls is not None:
             for name in (
@@ -1265,6 +1455,18 @@ class EmptyAssistantGuardPlugin(Star):
                         setattr(provider_cls, name, staticmethod(original))
                     else:
                         setattr(provider_cls, name, original)
+
+        runner_cls = _PATCH_CLASSES.get("ToolLoopAgentRunner")
+        if runner_cls is not None:
+            runner_pairs = {
+                "_sanitize_contexts_for_provider": "_runner_sanitize_contexts_for_provider",
+                "_complete_with_assistant_response": "_runner_complete_with_assistant_response",
+            }
+            for attr_name, key in runner_pairs.items():
+                wrapper = _PATCH_WRAPPERS.get(key)
+                original = _PATCH_ORIGINALS.get(key)
+                if wrapper is not None and original is not None and getattr(runner_cls, attr_name, None) is wrapper:
+                    setattr(runner_cls, attr_name, original)
 
         request_cls = _PATCH_CLASSES.get("ProviderRequest")
         wrapper = _PATCH_WRAPPERS.get("ProviderRequest.__setattr__")

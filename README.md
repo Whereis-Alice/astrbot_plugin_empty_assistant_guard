@@ -34,6 +34,8 @@ data/plugins/astrbot_plugin_empty_assistant_guard/requests/<umo-hash>-<request-i
 
 ```text
 provider_action = repair
+patch_agent_runner = true
+patch_openai_provider = true
 repair_strategy = drop
 drop_orphan_tool_messages = true
 ```
