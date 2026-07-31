@@ -1,5 +1,10 @@
 # 更新日志
 
+## 0.2.4
+
+- 修复主模型报错后切换回退模型时覆盖错误模型名称，导致 `status_model_keywords` 无法找到 Kimi 错误记录的问题。
+- 状态和 dump 单独保存产生 Provider 错误的模型，不再被后续 Gemini 等回退模型覆盖。
+
 ## 0.2.3
 
 - 修复 OpenAI SDK `AsyncCompletions.create` 包装器丢失原始函数签名的问题；该问题会让 AstrBot 把必填的 `messages` 和 `model` 错误移入 `extra_body`，导致所有 OpenAI 兼容主模型和回退模型一起报错。

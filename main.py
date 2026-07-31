@@ -21,7 +21,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.2.3"
+PLUGIN_VERSION = "0.2.4"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -113,6 +113,8 @@ class AuditState:
     blocked: bool = False
     provider_error: str = ""
     provider_error_count: int = 0
+    provider_error_model: str = ""
+    empty_output_model: str = ""
     fallback_repair_attempted: bool = False
     fallback_repair_payload_id: int | None = None
     fallback_repair_attempt_count: int = 0
@@ -571,6 +573,7 @@ class EmptyAssistantGuardPlugin(Star):
         request_payloads = payloads or {}
         state.provider_model = str(request_payloads.get("model") or state.provider_model)
         state.empty_output_count += 1
+        state.empty_output_model = state.provider_model
         state.last_empty_output = str(error)
         if response_summary:
             state.last_empty_output_response = self._preview_text(
@@ -791,11 +794,13 @@ class EmptyAssistantGuardPlugin(Star):
             state.provider_action = self._provider_action()
             state.provider_error = str(error)
             state.provider_error_count += 1
+            state.provider_error_model = state.provider_model
             self._append_dump_event(
                 state,
                 "provider_api_error",
                 {
                     "error": str(error),
+                    "model": state.provider_error_model,
                     "payload_bad_count": len(payload_findings),
                     "context_bad_count": len(context_findings),
                     "payload_message_previews": [
@@ -1320,8 +1325,8 @@ class EmptyAssistantGuardPlugin(Star):
         matching = [
             state
             for state in reversed(states)
-            if state.provider_model
-            and any(keyword in state.provider_model.casefold() for keyword in keywords)
+            if self._status_state_model(state)
+            and any(keyword in self._status_state_model(state).casefold() for keyword in keywords)
         ]
         if only_errors:
             return next((state for state in matching if self._state_has_provider_error(state)), None)
@@ -1347,6 +1352,10 @@ class EmptyAssistantGuardPlugin(Star):
             or state.provider_error_count > 0
             or state.empty_output_count > 0
         )
+
+    def _status_state_model(self, state: AuditState) -> str:
+        """Use the model that produced the error before a fallback overwrote the active model."""
+        return state.provider_error_model or state.empty_output_model or state.provider_model
 
     def _status_model_keywords(self) -> list[str]:
         raw = self._cfg_str("status_model_keywords", "kimi,moonshot")
@@ -1915,7 +1924,7 @@ class EmptyAssistantGuardPlugin(Star):
             f"status_model_filter: {', '.join(self._status_model_keywords()) or 'all'}",
             f"status_only_errors: {self._cfg_bool('status_only_errors', True)}",
             f"request_id: {state.request_id}",
-            f"model: {state.provider_model or PREVIEW_FALLBACK}",
+            f"model: {self._status_state_model(state) or PREVIEW_FALLBACK}",
             f"last_phase: {(last_phase.phase if last_phase else PREVIEW_FALLBACK)}",
             f"bad_messages: {(latest_bad.bad_count if latest_bad else 0)}",
             f"provider_action: {state.provider_action}",
@@ -1927,6 +1936,8 @@ class EmptyAssistantGuardPlugin(Star):
             f"source_hint: {self._source_hint(state)}",
         ]
         if state.provider_error:
+            if state.provider_error_model:
+                lines.append(f"provider_error_model: {state.provider_error_model}")
             lines.append(f"provider_error_count: {state.provider_error_count}")
             lines.append(f"last_provider_error: {self._preview_text(state.provider_error, limit=1000)}")
         if state.empty_output_count:
