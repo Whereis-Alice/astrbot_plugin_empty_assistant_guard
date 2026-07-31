@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.3
+
+- Kept a bounded history of recent LLM requests for each conversation instead of exposing only the last auxiliary-model request.
+- Added `status_model_keywords`, defaulting to `kimi,moonshot`, so `empty_assistant_guard_status` and `empty_assistant_guard_dump` follow the most recent Kimi/Moonshot request.
+- Added `recent_request_limit` for multi-request conversations.
+- Bound runner and late request diagnostics to the exact `ProviderRequest` state when available, avoiding cross-request attribution.
+- Clarified that the Agent Runner guard removes only invalid empty assistant messages and never clears normal conversation context.
+- Added a startup warning when an existing installation still uses `provider_action=report_only`.
+
 ## 0.1.2
 
 - Added Agent Runner level protection for AstrBot v4.26.8.

@@ -13,8 +13,8 @@
   },
   "patch_agent_runner": {
     "type": "bool",
-    "description": "在 Agent Runner 发送前兜底清理上下文",
-    "hint": "建议开启。它会在 ToolLoopAgentRunner 每次调用模型前清理 run_context.messages，并阻止核心把空 assistant 写回历史。",
+    "description": "发送前移除不合法的空 assistant 消息",
+    "hint": "建议开启。只会移除没有文本、reasoning_content、tool_calls 或 function_call 的空 assistant，并阻止这类空消息写回历史；不会清空正常对话上下文。",
     "default": true
   },
   "provider_action": {
@@ -78,6 +78,20 @@
     "default": 50,
     "min": 0,
     "max": 200
+  },
+  "recent_request_limit": {
+    "type": "int",
+    "description": "每个会话保留多少次最近模型请求",
+    "hint": "同一条消息可能依次调用主模型、工具模型和表情包判断模型。保留多次请求后，状态命令才能找到最近一次 Kimi 请求而不被后续 DeepSeek 请求覆盖。",
+    "default": 20,
+    "min": 1,
+    "max": 100
+  },
+  "status_model_keywords": {
+    "type": "string",
+    "description": "状态命令只显示哪些模型",
+    "hint": "多个关键词用英文逗号分隔，模型名包含任一关键词即匹配。默认 kimi,moonshot；留空则显示所有模型的最近请求。只影响 status 和 dump 的显示，不影响其他模型的检测与修复。",
+    "default": "kimi,moonshot"
   },
   "recent_tool_limit": {
     "type": "int",

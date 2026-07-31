@@ -20,7 +20,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.1.2"
+PLUGIN_VERSION = "0.1.3"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -179,6 +179,7 @@ class EmptyAssistantGuardPlugin(Star):
         self._requests_dir = self._data_dir / "requests"
         self._last_state_by_umo: dict[str, AuditState] = {}
         self._last_state_by_session: dict[str, AuditState] = {}
+        self._recent_states_by_umo: dict[str, deque[AuditState]] = {}
         self._recent_tools_by_umo: dict[str, deque[ToolTrace]] = {}
         self._plugin_file = Path(__file__).resolve()
 
@@ -189,6 +190,12 @@ class EmptyAssistantGuardPlugin(Star):
             self._apply_provider_patches()
         if self._cfg_bool("patch_agent_runner", True):
             self._apply_runner_patches()
+        if self._provider_action() == "report_only":
+            logger.warning(
+                "[%s] 当前配置 provider_action=report_only：只记录，不会修复空 assistant；"
+                "要解决上游 400 请改为 repair。",
+                PLUGIN_ID,
+            )
         logger.info("[%s] initialized", PLUGIN_ID)
 
     async def terminate(self) -> None:
@@ -351,19 +358,19 @@ class EmptyAssistantGuardPlugin(Star):
 
     @filter.command("empty_assistant_guard_status")
     async def empty_assistant_guard_status(self, event: AstrMessageEvent):
-        """Show the latest empty-assistant audit for this conversation."""
-        state = self._last_state_by_umo.get(event.unified_msg_origin)
+        """Show the latest matching empty-assistant audit for this conversation."""
+        state = self._state_for_status(event.unified_msg_origin)
         if state is None:
-            yield event.plain_result("EmptyAssistantGuard: 当前会话还没有记录。")
+            yield event.plain_result(self._missing_status_message(event.unified_msg_origin))
             return
         yield event.plain_result(self._format_status(state))
 
     @filter.command("empty_assistant_guard_dump")
     async def empty_assistant_guard_dump(self, event: AstrMessageEvent):
-        """Show the dump path for the latest audit in this conversation."""
-        state = self._last_state_by_umo.get(event.unified_msg_origin)
+        """Show the dump path for the latest matching audit in this conversation."""
+        state = self._state_for_status(event.unified_msg_origin)
         if state is None:
-            yield event.plain_result("EmptyAssistantGuard: 当前会话还没有 dump。")
+            yield event.plain_result(self._missing_status_message(event.unified_msg_origin))
             return
         yield event.plain_result(f"EmptyAssistantGuard dump: {state.dump_dir}")
 
@@ -423,18 +430,23 @@ class EmptyAssistantGuardPlugin(Star):
         if not self._cfg_bool("enabled", True):
             return contexts
 
+        state = self._state_for_runner(runner)
+        provider_id = self._runner_provider_id(runner)
+        action = self._provider_action()
+        if state is not None:
+            state.provider_model = provider_id or state.provider_model
+            state.provider_action = action
+            self._remember_state(state)
+
         context_list = list(contexts or [])
         findings = self._find_bad_assistant_messages(context_list)
         if not findings:
             return contexts
 
-        state = self._state_for_runner(runner)
-        provider_id = self._runner_provider_id(runner)
         if state is not None:
-            state.provider_model = provider_id or state.provider_model
             self._record_phase(state, "runner_contexts_before_provider", context_list)
+            self._remember_state(state)
 
-        action = self._provider_action()
         if action not in {"repair", "fix"}:
             logger.warning(
                 "[%s] runner contexts contain %s empty assistant message(s), but provider_action=%s provider=%s",
@@ -706,19 +718,36 @@ class EmptyAssistantGuardPlugin(Star):
         self._last_state_by_umo[state.umo] = state
         if state.session_id:
             self._last_state_by_session[state.session_id] = state
+        self._remember_recent_state(state)
         self._trim_state_cache()
+
+    def _remember_recent_state(self, state: AuditState) -> None:
+        limit = max(1, self._cfg_int("recent_request_limit", 20))
+        queue = self._recent_states_by_umo.get(state.umo)
+        if queue is None or queue.maxlen != limit:
+            existing = list(queue)[-limit:] if queue is not None else []
+            queue = deque(existing, maxlen=limit)
+            self._recent_states_by_umo[state.umo] = queue
+        if any(item.request_id == state.request_id for item in queue):
+            return
+        queue.append(state)
 
     def _trim_state_cache(self) -> None:
         max_items = self._cfg_int("remember_last_sessions", 50)
         if max_items <= 0:
             self._last_state_by_umo.clear()
             self._last_state_by_session.clear()
+            self._recent_states_by_umo.clear()
             return
         while len(self._last_state_by_umo) > max_items:
             first_key = next(iter(self._last_state_by_umo))
             removed = self._last_state_by_umo.pop(first_key)
-            if removed.session_id:
+            if (
+                removed.session_id
+                and self._last_state_by_session.get(removed.session_id) is removed
+            ):
                 self._last_state_by_session.pop(removed.session_id, None)
+            self._recent_states_by_umo.pop(first_key, None)
 
     def _set_state_on_event(self, event: AstrMessageEvent, state: AuditState) -> None:
         try:
@@ -755,13 +784,14 @@ class EmptyAssistantGuardPlugin(Star):
         event: AstrMessageEvent,
         req: ProviderRequest | None,
     ) -> AuditState | None:
-        state = self._event_state(event)
-        if state is not None:
-            return state
         if req is not None:
             state = getattr(req, STATE_ATTR, None)
             if isinstance(state, AuditState):
                 return state
+        state = self._event_state(event)
+        if state is not None:
+            return state
+        if req is not None:
             session_id = self._session_key(getattr(req, "session_id", "") or "")
             if session_id:
                 return self._last_state_by_session.get(session_id)
@@ -782,6 +812,9 @@ class EmptyAssistantGuardPlugin(Star):
 
     def _state_for_runner(self, runner: Any) -> AuditState | None:
         req = getattr(runner, "req", None)
+        state = getattr(req, STATE_ATTR, None)
+        if isinstance(state, AuditState):
+            return state
         session_id = self._session_key(getattr(req, "session_id", "") or "")
         if session_id:
             state = self._last_state_by_session.get(session_id)
@@ -796,19 +829,62 @@ class EmptyAssistantGuardPlugin(Star):
     def _runner_provider_id(self, runner: Any) -> str:
         provider = getattr(runner, "provider", None)
         provider_config = getattr(provider, "provider_config", None)
+        values: list[str] = []
         if isinstance(provider_config, dict):
-            value = provider_config.get("id") or provider_config.get("model")
+            for key in ("id", "model", "model_name"):
+                value = provider_config.get(key)
+                if value:
+                    values.append(str(value))
+        for attr in ("model", "model_name"):
+            value = getattr(provider, attr, "")
             if value:
-                return str(value)
+                values.append(str(value))
         req = getattr(runner, "req", None)
         value = getattr(req, "model", "")
-        return str(value or "")
+        if value:
+            values.append(str(value))
+
+        unique: list[str] = []
+        for value in values:
+            folded = value.casefold()
+            if any(folded in existing.casefold() for existing in unique):
+                continue
+            unique.append(value)
+        return "/".join(unique)
 
     def _latest_state(self) -> AuditState | None:
         if not self._last_state_by_umo:
             return None
         last_key = next(reversed(self._last_state_by_umo))
         return self._last_state_by_umo.get(last_key)
+
+    def _state_for_status(self, umo: str) -> AuditState | None:
+        keywords = self._status_model_keywords()
+        if not keywords:
+            return self._last_state_by_umo.get(umo)
+        states = self._recent_states_by_umo.get(umo, ())
+        for state in reversed(states):
+            model = state.provider_model.casefold()
+            if model and any(keyword in model for keyword in keywords):
+                return state
+        return None
+
+    def _status_model_keywords(self) -> list[str]:
+        raw = self._cfg_str("status_model_keywords", "kimi,moonshot")
+        normalized = raw.replace("，", ",").replace(";", ",").replace("；", ",")
+        return [item.strip().casefold() for item in normalized.split(",") if item.strip()]
+
+    def _missing_status_message(self, umo: str) -> str:
+        keywords = self._status_model_keywords()
+        if not keywords:
+            return "EmptyAssistantGuard: 当前会话还没有记录。"
+        latest = self._last_state_by_umo.get(umo)
+        latest_model = latest.provider_model if latest is not None else PREVIEW_FALLBACK
+        return (
+            "EmptyAssistantGuard: 当前会话还没有匹配模型筛选的记录。\n"
+            f"status_model_filter: {', '.join(keywords)}\n"
+            f"latest_overall_model: {latest_model or PREVIEW_FALLBACK}"
+        )
 
     def _record_phase(
         self,
@@ -1207,6 +1283,7 @@ class EmptyAssistantGuardPlugin(Star):
         lines = [
             "EmptyAssistantGuard",
             f"version: {PLUGIN_VERSION}",
+            f"status_model_filter: {', '.join(self._status_model_keywords()) or 'all'}",
             f"request_id: {state.request_id}",
             f"model: {state.provider_model or PREVIEW_FALLBACK}",
             f"last_phase: {(last_phase.phase if last_phase else PREVIEW_FALLBACK)}",

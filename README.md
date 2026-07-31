@@ -16,9 +16,11 @@ Assistant messages must contain text, reasoning content, or tool_calls.
 ## 命令
 
 - `empty_assistant_guard_status`
-  查看当前会话最近一次诊断摘要。
+  查看当前会话中符合模型筛选的最近一次诊断摘要。默认只看 Kimi/Moonshot。
 - `empty_assistant_guard_dump`
-  查看最近一次请求的 dump 目录。
+  查看符合模型筛选的最近一次请求 dump 目录。
+
+AstrBot 的一条用户消息可能连续产生多次 LLM 请求，例如主模型调用工具、工具执行后再次请求主模型，以及表情包插件单独调用 DeepSeek。插件会为每个会话保留最近多次请求，后续辅助模型不会再覆盖 Kimi 的状态。
 
 dump 文件保存在：
 
@@ -38,9 +40,15 @@ patch_agent_runner = true
 patch_openai_provider = true
 repair_strategy = drop
 drop_orphan_tool_messages = true
+status_model_keywords = kimi,moonshot
+recent_request_limit = 20
 ```
 
 `repair` 会在请求发给上游前删除无文本、无 `reasoning_content`、无 `tool_calls` 的 assistant 消息。若空 assistant 后面紧跟 `tool` 消息，插件默认会一起删除这些孤立 tool 消息，因为它们通常是丢失了前置 `tool_calls` 的残片。
+
+`status_model_keywords` 只控制 `status` 和 `dump` 显示哪一个模型的最近记录，不会缩小守卫的检测与修复范围。留空可恢复为显示所有模型。
+
+升级插件不会覆盖 AstrBot 已保存的旧配置。如果状态中仍显示 `provider_action: report_only`，请在插件配置中手动改成 `repair`，否则插件只记录问题，不会自动修复。
 
 ## 看来源
 
