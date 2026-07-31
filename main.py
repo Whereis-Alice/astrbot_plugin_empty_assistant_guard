@@ -20,7 +20,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.1.5"
+PLUGIN_VERSION = "0.1.6"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -618,6 +618,8 @@ class EmptyAssistantGuardPlugin(Star):
                         self._preview_value(item)
                         for item in list(context_messages)[: self._cfg_int("detail_preview_limit", 8)]
                     ],
+                    "payload_assistant_messages": self._assistant_message_summaries(payload_messages),
+                    "context_assistant_messages": self._assistant_message_summaries(context_messages),
                 },
             )
             self._record_phase(state, "provider_error", payload_messages)
@@ -934,11 +936,26 @@ class EmptyAssistantGuardPlugin(Star):
         if not keywords:
             return self._last_state_by_umo.get(umo)
         states = self._recent_states_by_umo.get(umo, ())
-        for state in reversed(states):
-            model = state.provider_model.casefold()
-            if model and any(keyword in model for keyword in keywords):
+        matching = [
+            state
+            for state in reversed(states)
+            if state.provider_model
+            and any(keyword in state.provider_model.casefold() for keyword in keywords)
+        ]
+        for state in matching:
+            if self._state_has_problem(state):
                 return state
+        if matching:
+            return matching[0]
         return None
+
+    def _state_has_problem(self, state: AuditState) -> bool:
+        return bool(
+            state.provider_error
+            or state.blocked
+            or state.repairs
+            or any(phase.bad_count > 0 for phase in state.phases)
+        )
 
     def _status_model_keywords(self) -> list[str]:
         raw = self._cfg_str("status_model_keywords", "kimi,moonshot")
@@ -1032,7 +1049,7 @@ class EmptyAssistantGuardPlugin(Star):
         return findings
 
     def _is_bad_assistant_message(self, message: dict[str, Any]) -> bool:
-        if str(message.get("role", "")).lower() != "assistant":
+        if self._normalized_role(message.get("role", "")) != "assistant":
             return False
         if self._content_has_text(message.get("content")):
             return False
@@ -1040,9 +1057,9 @@ class EmptyAssistantGuardPlugin(Star):
             return False
         if self._content_has_text(message.get("reasoning")):
             return False
-        if self._has_non_empty_value(message.get("tool_calls")):
+        if self._has_valid_call_value(message.get("tool_calls")):
             return False
-        if self._has_non_empty_value(message.get("function_call")):
+        if self._has_valid_call_value(message.get("function_call")):
             return False
         return True
 
@@ -1065,7 +1082,7 @@ class EmptyAssistantGuardPlugin(Star):
 
         while index < len(original):
             item = original[index]
-            role = str(item.get("role", "")).lower()
+            role = self._normalized_role(item.get("role", ""))
 
             if self._is_bad_assistant_message(item):
                 if strategy == "placeholder":
@@ -1078,7 +1095,7 @@ class EmptyAssistantGuardPlugin(Star):
                 index += 1
 
                 if drop_orphan_tools:
-                    while index < len(original) and str(original[index].get("role", "")).lower() == "tool":
+                    while index < len(original) and self._normalized_role(original[index].get("role", "")) == "tool":
                         changes.append(
                             f"dropped orphan tool message after empty assistant at index {index}"
                         )
@@ -1086,7 +1103,7 @@ class EmptyAssistantGuardPlugin(Star):
                 continue
 
             if role == "assistant":
-                tool_group_open = self._has_non_empty_value(item.get("tool_calls"))
+                tool_group_open = self._has_valid_call_value(item.get("tool_calls"))
                 repaired.append(item)
                 index += 1
                 continue
@@ -1122,10 +1139,61 @@ class EmptyAssistantGuardPlugin(Star):
     def _following_tool_names(self, messages: list[dict[str, Any]], index: int) -> list[str]:
         names: list[str] = []
         for item in messages[index + 1 :]:
-            if str(item.get("role", "")).lower() != "tool":
+            if self._normalized_role(item.get("role", "")) != "tool":
                 break
             names.append(self._tool_message_name(item))
         return names
+
+    def _normalized_role(self, value: Any) -> str:
+        text = str(value or "").strip().lower()
+        return text.rsplit(".", 1)[-1]
+
+    def _has_valid_call_value(self, value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, (list, tuple, set)):
+            return any(self._has_valid_call_value(item) for item in value)
+        if isinstance(value, dict):
+            if not value:
+                return False
+            if self._has_valid_call_value(value.get("function")):
+                return True
+            for key in ("id", "name", "arguments"):
+                if self._content_has_text(value.get(key)):
+                    return True
+            return False
+        function = getattr(value, "function", None)
+        if function is not None and self._has_valid_call_value(function):
+            return True
+        for attr in ("id", "name", "arguments"):
+            if hasattr(value, attr) and self._content_has_text(getattr(value, attr, None)):
+                return True
+        return False
+
+    def _assistant_message_summaries(self, messages: Any) -> list[dict[str, Any]]:
+        try:
+            items = list(messages or [])
+        except Exception:
+            return []
+        summaries: list[dict[str, Any]] = []
+        for index, raw_item in enumerate(items):
+            item = self._ensure_message_dict(raw_item)
+            if self._normalized_role(item.get("role", "")) != "assistant":
+                continue
+            summaries.append(
+                {
+                    "index": index,
+                    "role": str(item.get("role", "")),
+                    "content": self._preview_value(item.get("content"), limit=1000),
+                    "reasoning_content": self._preview_value(
+                        item.get("reasoning_content"), limit=1000
+                    ),
+                    "reasoning": self._preview_value(item.get("reasoning"), limit=1000),
+                    "tool_calls": self._preview_value(item.get("tool_calls"), limit=1000),
+                    "function_call": self._preview_value(item.get("function_call"), limit=1000),
+                }
+            )
+        return summaries
 
     def _likely_cause_for_bad_message(
         self,

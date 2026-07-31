@@ -26,6 +26,8 @@ AstrBot 的一条用户消息可能连续产生多次 LLM 请求，例如主模�
 
 如果上游仍返回空 assistant 400，即使当前 payload 已经被 AstrBot 内置清理过，插件也会记录 `provider_error`、原始上下文摘要和 dump 路径；状态中的 `last_provider_error` 表示这条请求确实失败过，不会再显示成普通的 `bad_messages=0` 请求。
 
+状态命令会优先显示最近一条发生过错误、修复或拦截的 Kimi 请求，避免后续成功请求覆盖故障记录。API 错误 dump 还会列出所有 assistant 消息的索引、content、reasoning 和工具调用字段。
+
 dump 文件保存在：
 
 ```text

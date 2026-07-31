@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.6
+
+- Made status prefer the most recent matching Kimi request with an error, repair, or block over a later successful request.
+- Added assistant-message field summaries to API-error dumps, including message index, content, reasoning, tool calls, and function calls.
+- Normalized enum-like message roles and validated the actual contents of tool/function call fields during empty-assistant detection.
+
 ## 0.1.5
 
 - Recorded matching empty-assistant API errors even when the final payload no longer exposed a detectable empty assistant.
