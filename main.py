@@ -20,7 +20,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.1.7"
+PLUGIN_VERSION = "0.1.8"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -111,6 +111,7 @@ class AuditState:
     provider_error_count: int = 0
     fallback_repair_attempted: bool = False
     fallback_repair_payload_id: int | None = None
+    fallback_repair_attempt_count: int = 0
 
 
 class TrackedRequestList(list[Any]):
@@ -186,7 +187,7 @@ class EmptyAssistantGuardPlugin(Star):
         self._last_state_by_session: dict[str, AuditState] = {}
         self._recent_states_by_umo: dict[str, deque[AuditState]] = {}
         self._recent_tools_by_umo: dict[str, deque[ToolTrace]] = {}
-        self._fallback_repair_payload_ids: set[int] = set()
+        self._fallback_repair_attempts_by_payload: dict[int, int] = {}
         self._plugin_file = Path(__file__).resolve()
 
     async def initialize(self) -> None:
@@ -640,9 +641,9 @@ class EmptyAssistantGuardPlugin(Star):
             and not context_findings
             and self._provider_action() in {"repair", "fix"}
             and self._cfg_bool("fallback_repair_on_unmatched_api_error", True)
-            and not self._fallback_repair_was_attempted(state, payloads)
+            and not self._fallback_repair_exhausted(state, payloads)
         ):
-            self._mark_fallback_repair_attempted(state, payloads)
+            attempt = self._mark_fallback_repair_attempted(state, payloads)
             fallback = self._fallback_repair_unmatched_payload(
                 state=state,
                 payloads=payloads,
@@ -652,8 +653,10 @@ class EmptyAssistantGuardPlugin(Star):
             if fallback:
                 logger.warning(
                     "[%s] fallback repaired unmatched empty-assistant API error; "
-                    "dropped last assistant from the request copy; retrying",
+                    "dropped last assistant from the request copy; attempt=%s/%s; retrying",
                     PLUGIN_ID,
+                    attempt,
+                    self._fallback_repair_max_attempts(),
                 )
                 return (
                     False,
@@ -689,26 +692,40 @@ class EmptyAssistantGuardPlugin(Star):
             image_fallback_used,
         )
 
-    def _fallback_repair_was_attempted(
+    def _fallback_repair_max_attempts(self) -> int:
+        return max(1, min(self._cfg_int("fallback_repair_max_attempts", 3), 10))
+
+    def _fallback_repair_attempt_count(
+        self,
+        state: AuditState | None,
+        payloads: dict[str, Any],
+    ) -> int:
+        payload_id = id(payloads)
+        if state is not None and state.fallback_repair_payload_id == payload_id:
+            return state.fallback_repair_attempt_count
+        return self._fallback_repair_attempts_by_payload.get(payload_id, 0)
+
+    def _fallback_repair_exhausted(
         self,
         state: AuditState | None,
         payloads: dict[str, Any],
     ) -> bool:
-        payload_id = id(payloads)
-        if state is not None and state.fallback_repair_payload_id == payload_id:
-            return True
-        return payload_id in self._fallback_repair_payload_ids
+        return self._fallback_repair_attempt_count(state, payloads) >= self._fallback_repair_max_attempts()
 
     def _mark_fallback_repair_attempted(
         self,
         state: AuditState | None,
         payloads: dict[str, Any],
-    ) -> None:
+    ) -> int:
+        payload_id = id(payloads)
+        attempt = self._fallback_repair_attempt_count(state, payloads) + 1
+        self._fallback_repair_attempts_by_payload[payload_id] = attempt
         if state is not None:
             state.fallback_repair_attempted = True
-            state.fallback_repair_payload_id = id(payloads)
+            state.fallback_repair_payload_id = payload_id
+            state.fallback_repair_attempt_count = attempt
             self._remember_state(state)
-        self._fallback_repair_payload_ids.add(id(payloads))
+        return attempt
 
     def _fallback_repair_unmatched_payload(
         self,
@@ -1612,6 +1629,11 @@ class EmptyAssistantGuardPlugin(Star):
             last_repair = state.repairs[-1]
             lines.append(
                 f"last_repair: {last_repair.action}, {last_repair.before_messages}->{last_repair.after_messages}"
+            )
+        if state.fallback_repair_attempted:
+            lines.append(
+                "fallback_repair_attempts: "
+                f"{state.fallback_repair_attempt_count}/{self._fallback_repair_max_attempts()}"
             )
         lines.append(f"dump: {state.dump_dir}")
         return "\n".join(lines)

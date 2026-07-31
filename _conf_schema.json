@@ -46,8 +46,16 @@
   "fallback_repair_on_unmatched_api_error": {
     "type": "bool",
     "description": "无法定位空 assistant 时删除最后一条 assistant 并重试",
-    "hint": "仅针对明确的空 assistant 400。只修改本次请求副本，不会清空或删除正常会话历史。建议开启。每个请求最多执行一次。",
+    "hint": "仅针对明确的空 assistant 400。只修改本次请求副本，不会清空或删除正常会话历史。建议开启。每个请求最多执行指定次数。",
     "default": true
+  },
+  "fallback_repair_max_attempts": {
+    "type": "int",
+    "description": "未定位空 assistant 时最多轮换多少条最近 assistant",
+    "hint": "每次重试只移除一条最近 assistant 及其紧邻的孤立 tool。默认 3 次，最多 10 次；达到上限后停止，避免继续删除上下文。",
+    "default": 3,
+    "min": 1,
+    "max": 10
   },
   "assistant_placeholder_text": {
     "type": "string",
