@@ -1,5 +1,11 @@
 # 更新日志
 
+## 0.2.7
+
+- 新增可选的最终 HTTP payload 修复：对带 `tool_calls` 但 `content` 为空的 assistant 补一个空格。
+- 对真正没有正文、reasoning 或工具调用的 assistant 继续执行删除，并同步删除孤立 tool 消息。
+- 增加模型关键词筛选，默认只修改 Kimi/Moonshot 请求；默认关闭，避免影响其他模型。
+
 ## 0.2.6
 
 - 修复序列化 payload 观测在请求发送前同步解析和写磁盘，可能拖慢大工具集请求的问题。

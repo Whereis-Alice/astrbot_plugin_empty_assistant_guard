@@ -17,6 +17,25 @@
     "hint": "开启后在 HTTP 请求发送前读取已序列化的 JSON 请求体，只记录消息摘要、字段、大小和哈希，不记录 API Key。用于区分 AstrBot/OpenAI SDK 与 TokenRouter 的转换问题。",
     "default": true
   },
+  "repair_serialized_http_payload": {
+    "type": "bool",
+    "description": "发送前修复序列化 HTTP payload",
+    "hint": "实验性选项。只对匹配模型的最终 JSON 生效：带 tool_calls 但 content 为空时补一个空格；真正没有正文、reasoning 或调用的 assistant 会删除。默认关闭，确认 Kimi 兼容性问题后再开启。",
+    "default": false
+  },
+  "serialized_payload_repair_mode": {
+    "type": "string",
+    "description": "序列化 payload 空 assistant 的修复方式",
+    "hint": "space=保留 tool_calls 并给空 content 补一个空格；drop=只删除不含正文、reasoning 或调用的 assistant。通常先用 space 测试 Kimi。",
+    "default": "space",
+    "enum": ["space", "drop"]
+  },
+  "serialized_payload_repair_model_keywords": {
+    "type": "string",
+    "description": "序列化 payload 修复的模型筛选",
+    "hint": "模型名包含任一关键词才会修改最终请求。多个关键词用英文逗号分隔，默认只匹配 kimi、moonshot；留空表示匹配全部模型。",
+    "default": "kimi,moonshot"
+  },
   "patch_agent_runner": {
     "type": "bool",
     "description": "发送前移除不合法的空 assistant 消息",

@@ -22,7 +22,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.2.6"
+PLUGIN_VERSION = "0.2.7"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -132,6 +132,8 @@ class AuditState:
     provider_error_serialized_wire_bad_count: int = 0
     provider_error_serialized_wire_message_count: int = 0
     provider_error_serialized_wire_model: str = ""
+    serialized_wire_repair_count: int = 0
+    serialized_wire_repair_mode: str = ""
     empty_output_count: int = 0
     last_empty_output: str = ""
     last_empty_output_response: str = ""
@@ -665,6 +667,143 @@ class EmptyAssistantGuardPlugin(Star):
                 model or PREVIEW_FALLBACK,
                 state.dump_dir,
             )
+
+    def repair_serialized_http_payload(
+        self,
+        provider: Any,
+        request: Any,
+    ) -> bool:
+        """Optionally repair provider-specific empty assistant validation before send."""
+        if not self._cfg_bool("repair_serialized_http_payload", False):
+            return False
+
+        try:
+            raw_body = request.content
+            raw_bytes = (
+                raw_body.encode("utf-8", errors="replace")
+                if isinstance(raw_body, str)
+                else bytes(raw_body or b"")
+            )
+            decoded = json.loads(raw_bytes.decode("utf-8"))
+        except Exception as exc:
+            logger.warning(
+                "[%s] serialized HTTP payload repair skipped: %s",
+                PLUGIN_ID,
+                exc,
+            )
+            return False
+
+        if not isinstance(decoded, dict) or not isinstance(decoded.get("messages"), list):
+            return False
+
+        model = str(decoded.get("model") or "")
+        if not self._serialized_repair_model_matches(model):
+            return False
+
+        messages = copy.deepcopy(decoded["messages"])
+        mode = self._cfg_str("serialized_payload_repair_mode", "space").strip().lower()
+        if mode not in {"space", "drop"}:
+            mode = "space"
+        changes: list[str] = []
+
+        if mode == "space":
+            for index, item in enumerate(messages):
+                normalized = self._ensure_message_dict(item)
+                if self._normalized_role(normalized.get("role", "")) != "assistant":
+                    continue
+                if self._content_has_text(normalized.get("content")):
+                    continue
+                if self._content_has_text(normalized.get("reasoning_content")):
+                    continue
+                if self._content_has_text(normalized.get("reasoning")):
+                    continue
+                if not (
+                    self._has_valid_call_value(normalized.get("tool_calls"))
+                    or self._has_valid_call_value(normalized.get("function_call"))
+                ):
+                    continue
+                normalized["content"] = " "
+                messages[index] = normalized
+                changes.append(
+                    f"filled assistant content with one space at index {index}"
+                )
+
+        repaired_messages, drop_changes = self._repair_payload_messages(
+            messages,
+            strategy="drop",
+        )
+        changes.extend(drop_changes)
+        if not changes:
+            return False
+
+        decoded["messages"] = repaired_messages
+        serialized = json.dumps(
+            decoded,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        try:
+            from httpx import ByteStream
+
+            request._content = serialized
+            request.stream = ByteStream(serialized)
+            request.headers["Content-Length"] = str(len(serialized))
+        except Exception as exc:
+            logger.warning(
+                "[%s] serialized HTTP payload repair could not replace request body: %s",
+                PLUGIN_ID,
+                exc,
+            )
+            return False
+
+        state = self._state_for_provider(provider) or self._latest_state()
+        if state is not None:
+            state.serialized_wire_repair_count += 1
+            state.serialized_wire_repair_mode = mode
+            repair = RepairRecord(
+                phase="provider_http_serialized_repair",
+                action=f"repair:serialized_{mode}",
+                before_messages=len(messages),
+                after_messages=len(repaired_messages),
+                changes=changes,
+            )
+            state.repairs.append(repair)
+            self._append_dump_event(
+                state,
+                "provider_http_serialized_repair",
+                {
+                    "model": model,
+                    "mode": mode,
+                    "changes": changes,
+                    "before_messages": len(messages),
+                    "after_messages": len(repaired_messages),
+                    "body_bytes": len(serialized),
+                    "body_sha256_16": hashlib.sha256(serialized).hexdigest()[:16],
+                },
+            )
+            self._remember_state(state)
+
+        logger.warning(
+            "[%s] repaired serialized HTTP payload model=%s mode=%s changes=%s dump=%s",
+            PLUGIN_ID,
+            model or PREVIEW_FALLBACK,
+            mode,
+            len(changes),
+            state.dump_dir if state is not None else PREVIEW_FALLBACK,
+        )
+        return True
+
+    def _serialized_repair_model_matches(self, model: str) -> bool:
+        raw = self._cfg_str(
+            "serialized_payload_repair_model_keywords",
+            "kimi,moonshot",
+        )
+        normalized = raw.replace("，", ",").replace(";", ",").replace("；", ",")
+        keywords = [item.strip().casefold() for item in normalized.split(",") if item.strip()]
+        if not keywords:
+            return True
+        lowered = model.casefold()
+        return any(keyword in lowered for keyword in keywords)
 
     def on_provider_empty_output(
         self,
@@ -2117,6 +2256,12 @@ class EmptyAssistantGuardPlugin(Star):
                 f"message_count={state.provider_error_serialized_wire_message_count}, "
                 f"model={state.provider_error_serialized_wire_model or PREVIEW_FALLBACK}"
             )
+        if state.serialized_wire_repair_count:
+            lines.append(
+                "serialized_http_repair: "
+                f"count={state.serialized_wire_repair_count}, "
+                f"mode={state.serialized_wire_repair_mode or PREVIEW_FALLBACK}"
+            )
         if latest_bad:
             for finding in latest_bad.findings[: self._cfg_int("status_finding_limit", 3)]:
                 lines.append(
@@ -2473,6 +2618,13 @@ class EmptyAssistantGuardPlugin(Star):
                 plugin = _ACTIVE_PLUGIN
                 provider = _HTTP_PROVIDER_BY_CLIENT.get(id(api_client))
                 capture_task = None
+                if (
+                    plugin is not None
+                    and provider is not None
+                    and plugin._cfg_bool("repair_serialized_http_payload", False)
+                ):
+                    plugin.repair_serialized_http_payload(provider, request)
+
                 if (
                     plugin is not None
                     and provider is not None

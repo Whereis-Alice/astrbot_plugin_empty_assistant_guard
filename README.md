@@ -46,6 +46,9 @@ provider_action = repair
 patch_agent_runner = true
 patch_openai_provider = true
 capture_serialized_http_payload = true
+repair_serialized_http_payload = false
+serialized_payload_repair_mode = space
+serialized_payload_repair_model_keywords = kimi,moonshot
 repair_strategy = drop
 drop_orphan_tool_messages = true
 fallback_repair_on_unmatched_api_error = true
@@ -68,6 +71,8 @@ recent_request_limit = 20
 `capture_hook_diffs` 默认开启，会逐个记录 `OnLLMRequestEvent` handler 前后的 `ProviderRequest.contexts` 差异。`capture_serialized_http_payload` 默认开启，会在 OpenAI SDK 完成 JSON 序列化、HTTPX 发送前记录消息摘要、请求字段、请求体大小和 SHA-256 短哈希，不记录完整请求体或 API Key。若 `source_hint` 显示某个 handler 首次引入空 assistant，优先检查该插件；若 `provider_http_serialized_payload` 仍干净但 Kimi 继续报错，问题发生在 HTTP 请求之后，更可能是 TokenRouter 或上游转换层。
 
 序列化观测在 `0.2.6` 起放到后台线程与 HTTP 请求并行执行，避免几百个工具的请求被诊断日志拖慢。
+
+`repair_serialized_http_payload` 默认关闭。开启后只修改匹配模型的最终 HTTP JSON：`space` 模式会给带有 `tool_calls` 但没有正文的 assistant 补一个空格，并删除真正没有正文、reasoning 或调用的空 assistant；`drop` 模式只执行后者。它不会清空 AstrBot 会话历史，修改只存在于本次发送的请求副本中。这个选项主要用于兼容不接受标准 `content: null + tool_calls` 的 Kimi/TokenRouter，上游修复后建议关闭。
 
 如果 AstrBot 报告 `OpenAI completion has no usable output`，这是上游返回了空模型结果，不等同于请求中的空 assistant。状态命令会额外显示 `empty_output_count`、`last_empty_output` 和 `empty_output_response`，其中包含响应 ID、结束原因和 token 用量摘要。此类问题优先检查 TokenRouter/Kimi 转换层和上下文长度，不要继续增加 `fallback_repair_max_attempts`。
 
