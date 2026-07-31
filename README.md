@@ -28,9 +28,9 @@ data/plugins/astrbot_plugin_empty_assistant_guard/requests/<umo-hash>-<request-i
 
 ## 处理模式
 
-默认 `provider_action=report_only`，只记录，不修改请求。
+默认 `provider_action=repair`，发现不合法的空 assistant 会在请求发给上游前自动修复。
 
-要直接兜底修复 Kimi/TokenRouter 的 400，可以改成：
+推荐配置：
 
 ```text
 provider_action = repair

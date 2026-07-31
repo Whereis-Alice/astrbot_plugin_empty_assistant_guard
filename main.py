@@ -20,7 +20,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.1.1"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -104,7 +104,7 @@ class AuditState:
     tools: list[ToolTrace] = field(default_factory=list)
     repairs: list[RepairRecord] = field(default_factory=list)
     provider_model: str = ""
-    provider_action: str = "report_only"
+    provider_action: str = "repair"
     blocked: bool = False
 
 
@@ -424,7 +424,7 @@ class EmptyAssistantGuardPlugin(Star):
             return
 
         state.provider_model = str(payloads.get("model") or "")
-        state.provider_action = self._cfg_str("provider_action", "report_only").strip().lower()
+        state.provider_action = self._provider_action()
         messages = payloads.get("messages", []) or []
         phase = self._record_phase(state, "provider_prepare", messages)
         self._remember_state(state)
@@ -433,11 +433,104 @@ class EmptyAssistantGuardPlugin(Star):
             return
 
         self._log_bad_payload(state, phase)
+        self._repair_or_block_payload(
+            state=state,
+            payloads=payloads,
+            context_query=context_query,
+            phase="provider_prepare",
+            before_messages=messages,
+        )
 
-        action = state.provider_action
+    def on_provider_payload_sanitize(
+        self,
+        payloads: dict[str, Any],
+    ) -> None:
+        if not self._cfg_bool("enabled", True):
+            return
+
+        state = self._latest_state()
+        self._repair_or_block_payload(
+            state=state,
+            payloads=payloads,
+            context_query=None,
+            phase="provider_sanitize",
+            before_messages=payloads.get("messages", []) or [],
+        )
+
+    def on_provider_api_error(
+        self,
+        provider: Any,
+        error: Exception,
+        payloads: dict[str, Any],
+        context_query: list[Any],
+        func_tool: Any,
+        chosen_key: str,
+        available_api_keys: list[str],
+        image_fallback_used: bool,
+    ) -> tuple[Any, ...] | None:
+        if not self._cfg_bool("enabled", True):
+            return None
+        if not self._is_empty_assistant_error(error):
+            return None
+
+        state = self._state_for_provider(provider) or self._latest_state()
+        before_messages = payloads.get("messages", []) or []
+        changed = self._repair_or_block_payload(
+            state=state,
+            payloads=payloads,
+            context_query=context_query,
+            phase="provider_error_retry",
+            before_messages=before_messages,
+        )
+        if not changed:
+            return None
+
+        logger.warning(
+            "[%s] repaired payload after empty-assistant API error; retrying request",
+            PLUGIN_ID,
+        )
+        return (
+            False,
+            chosen_key,
+            available_api_keys,
+            payloads,
+            context_query,
+            func_tool,
+            image_fallback_used,
+        )
+
+    def _repair_or_block_payload(
+        self,
+        *,
+        state: AuditState | None,
+        payloads: dict[str, Any],
+        context_query: list[Any] | None,
+        phase: str,
+        before_messages: Any,
+    ) -> bool:
+        messages = payloads.get("messages", []) or []
+        findings = self._find_bad_assistant_messages(messages)
+        if not findings:
+            return False
+
+        if state is not None:
+            state.provider_action = self._provider_action()
+            self._append_dump_event(
+                state,
+                f"{phase}_unsafe",
+                {
+                    "bad_count": len(findings),
+                    "findings": [asdict(item) for item in findings],
+                },
+            )
+
+        action = self._provider_action()
         if action in {"repair", "fix"}:
             strategy = self._cfg_str("repair_strategy", "drop").strip().lower()
-            repaired_messages, changes = self._repair_payload_messages(messages, strategy=strategy)
+            repaired_messages, changes = self._repair_payload_messages(
+                messages,
+                strategy=strategy,
+            )
             if changes:
                 payloads["messages"] = repaired_messages
                 if (
@@ -446,16 +539,17 @@ class EmptyAssistantGuardPlugin(Star):
                 ):
                     context_query[:] = copy.deepcopy(repaired_messages)
                 repair = RepairRecord(
-                    phase="provider_prepare",
+                    phase=phase,
                     action=f"repair:{strategy}",
-                    before_messages=len(list(messages)),
+                    before_messages=len(list(before_messages or [])),
                     after_messages=len(repaired_messages),
                     changes=changes,
                 )
-                state.repairs.append(repair)
-                self._append_dump_event(state, "provider_repair", asdict(repair))
-                self._record_phase(state, "provider_repaired", repaired_messages)
-                self._remember_state(state)
+                if state is not None:
+                    state.repairs.append(repair)
+                    self._append_dump_event(state, f"{phase}_repair", asdict(repair))
+                    self._record_phase(state, f"{phase}_repaired", repaired_messages)
+                    self._remember_state(state)
                 logger.warning(
                     "[%s] repaired unsafe provider payload: before=%s after=%s changes=%s",
                     PLUGIN_ID,
@@ -463,22 +557,33 @@ class EmptyAssistantGuardPlugin(Star):
                     repair.after_messages,
                     " | ".join(changes),
                 )
-            return
+                return True
+            return False
 
         if action == "block":
-            state.blocked = True
-            self._append_dump_event(
-                state,
-                "provider_block",
-                {
-                    "reason": "empty assistant messages detected",
-                    "findings": [asdict(item) for item in phase.findings],
-                },
-            )
-            self._remember_state(state)
+            if state is not None:
+                state.blocked = True
+                self._append_dump_event(
+                    state,
+                    f"{phase}_block",
+                    {
+                        "reason": "empty assistant messages detected",
+                        "findings": [asdict(item) for item in findings],
+                    },
+                )
+                self._remember_state(state)
             raise RuntimeError(
-                f"EmptyAssistantGuard blocked unsafe provider payload; dump={state.dump_dir}"
+                "EmptyAssistantGuard blocked unsafe provider payload"
+                + (f"; dump={state.dump_dir}" if state is not None else "")
             )
+
+        logger.warning(
+            "[%s] detected %s empty assistant message(s), but provider_action=%s",
+            PLUGIN_ID,
+            len(findings),
+            action,
+        )
+        return False
 
     def _new_state(self, umo: str, *, session_id: str) -> AuditState:
         request_id = f"{int(time.time() * 1000)}-{hashlib.sha1(str(time.time()).encode()).hexdigest()[:8]}"
@@ -570,6 +675,12 @@ class EmptyAssistantGuardPlugin(Star):
             return self._last_state_by_umo.get(last_key)
         return None
 
+    def _latest_state(self) -> AuditState | None:
+        if not self._last_state_by_umo:
+            return None
+        last_key = next(reversed(self._last_state_by_umo))
+        return self._last_state_by_umo.get(last_key)
+
     def _record_phase(
         self,
         state: AuditState,
@@ -603,6 +714,19 @@ class EmptyAssistantGuardPlugin(Star):
                 state.dump_dir,
             )
         return record
+
+    def _provider_action(self) -> str:
+        action = self._cfg_str("provider_action", "repair").strip().lower()
+        if action in {"repair", "fix", "block", "report_only"}:
+            return action
+        return "repair"
+
+    def _is_empty_assistant_error(self, error: Exception) -> bool:
+        text = str(error).lower()
+        return (
+            "assistant messages must contain text" in text
+            and "tool_calls" in text
+        )
 
     def _find_bad_assistant_messages(self, messages: Any) -> list[MessageFinding]:
         if not isinstance(messages, list):
@@ -1007,6 +1131,10 @@ class EmptyAssistantGuardPlugin(Star):
         _PATCH_ORIGINALS["text_chat"] = ProviderOpenAIOfficial.text_chat
         _PATCH_ORIGINALS["text_chat_stream"] = ProviderOpenAIOfficial.text_chat_stream
         _PATCH_ORIGINALS["_prepare_chat_payload"] = ProviderOpenAIOfficial._prepare_chat_payload
+        _PATCH_ORIGINALS["_sanitize_assistant_messages"] = (
+            ProviderOpenAIOfficial._sanitize_assistant_messages
+        )
+        _PATCH_ORIGINALS["_handle_api_error"] = ProviderOpenAIOfficial._handle_api_error
         _PATCH_ORIGINALS["ProviderRequest.__setattr__"] = getattr(ProviderRequest, "__setattr__")
         _PATCH_CLASSES["ProviderRequest"] = ProviderRequest
 
@@ -1042,6 +1170,52 @@ class EmptyAssistantGuardPlugin(Star):
                 plugin.on_provider_payload_prepared(provider, payloads, context_query)
             return payloads, context_query
 
+        def sanitize_assistant_messages_wrapper(payloads: dict[str, Any]) -> None:
+            _PATCH_ORIGINALS["_sanitize_assistant_messages"](payloads)
+            plugin = _ACTIVE_PLUGIN
+            if plugin is not None:
+                plugin.on_provider_payload_sanitize(payloads)
+
+        async def handle_api_error_wrapper(
+            provider: Any,
+            error: Exception,
+            payloads: dict,
+            context_query: list,
+            func_tool: Any,
+            chosen_key: str,
+            available_api_keys: list[str],
+            retry_cnt: int,
+            max_retries: int,
+            image_fallback_used: bool = False,
+        ) -> tuple[Any, ...]:
+            plugin = _ACTIVE_PLUGIN
+            if plugin is not None:
+                retry_result = plugin.on_provider_api_error(
+                    provider=provider,
+                    error=error,
+                    payloads=payloads,
+                    context_query=context_query,
+                    func_tool=func_tool,
+                    chosen_key=chosen_key,
+                    available_api_keys=available_api_keys,
+                    image_fallback_used=image_fallback_used,
+                )
+                if retry_result is not None:
+                    return retry_result
+
+            return await _PATCH_ORIGINALS["_handle_api_error"](
+                provider,
+                error,
+                payloads,
+                context_query,
+                func_tool,
+                chosen_key,
+                available_api_keys,
+                retry_cnt,
+                max_retries,
+                image_fallback_used=image_fallback_used,
+            )
+
         original_setattr = _PATCH_ORIGINALS["ProviderRequest.__setattr__"]
 
         def request_setattr_wrapper(req: ProviderRequest, name: str, value: Any) -> None:
@@ -1055,11 +1229,17 @@ class EmptyAssistantGuardPlugin(Star):
         ProviderOpenAIOfficial.text_chat = text_chat_wrapper
         ProviderOpenAIOfficial.text_chat_stream = text_chat_stream_wrapper
         ProviderOpenAIOfficial._prepare_chat_payload = prepare_chat_payload_wrapper
+        ProviderOpenAIOfficial._sanitize_assistant_messages = staticmethod(
+            sanitize_assistant_messages_wrapper
+        )
+        ProviderOpenAIOfficial._handle_api_error = handle_api_error_wrapper
         ProviderRequest.__setattr__ = request_setattr_wrapper
 
         _PATCH_WRAPPERS["text_chat"] = text_chat_wrapper
         _PATCH_WRAPPERS["text_chat_stream"] = text_chat_stream_wrapper
         _PATCH_WRAPPERS["_prepare_chat_payload"] = prepare_chat_payload_wrapper
+        _PATCH_WRAPPERS["_sanitize_assistant_messages"] = sanitize_assistant_messages_wrapper
+        _PATCH_WRAPPERS["_handle_api_error"] = handle_api_error_wrapper
         _PATCH_WRAPPERS["ProviderRequest.__setattr__"] = request_setattr_wrapper
         _PATCHED = True
         logger.info("[%s] patched ProviderOpenAIOfficial", PLUGIN_ID)
@@ -1071,11 +1251,20 @@ class EmptyAssistantGuardPlugin(Star):
 
         provider_cls = _PATCH_CLASSES.get("ProviderOpenAIOfficial")
         if provider_cls is not None:
-            for name in ("text_chat", "text_chat_stream", "_prepare_chat_payload"):
+            for name in (
+                "text_chat",
+                "text_chat_stream",
+                "_prepare_chat_payload",
+                "_sanitize_assistant_messages",
+                "_handle_api_error",
+            ):
                 wrapper = _PATCH_WRAPPERS.get(name)
                 original = _PATCH_ORIGINALS.get(name)
                 if wrapper is not None and original is not None and getattr(provider_cls, name, None) is wrapper:
-                    setattr(provider_cls, name, original)
+                    if name == "_sanitize_assistant_messages":
+                        setattr(provider_cls, name, staticmethod(original))
+                    else:
+                        setattr(provider_cls, name, original)
 
         request_cls = _PATCH_CLASSES.get("ProviderRequest")
         wrapper = _PATCH_WRAPPERS.get("ProviderRequest.__setattr__")

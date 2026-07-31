@@ -14,8 +14,8 @@
   "provider_action": {
     "type": "string",
     "description": "发现空 assistant 后的处理方式",
-    "hint": "report_only=只记录；repair=发送前修复；block=阻止本次请求并给出 dump 路径。",
-    "default": "report_only",
+    "hint": "repair=发送前自动修复，推荐；report_only=只记录不修复；block=阻止本次请求并给出 dump 路径。",
+    "default": "repair",
     "enum": ["report_only", "repair", "block"]
   },
   "repair_strategy": {
