@@ -1,0 +1,118 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "启用插件",
+    "hint": "关闭后不再记录请求，也不再修复或拦截 provider payload。",
+    "default": true
+  },
+  "patch_openai_provider": {
+    "type": "bool",
+    "description": "检查 OpenAI 兼容 Provider 最终 payload",
+    "hint": "开启后会轻量 patch ProviderOpenAIOfficial，在请求上游前检查 payloads.messages。",
+    "default": true
+  },
+  "provider_action": {
+    "type": "string",
+    "description": "发现空 assistant 后的处理方式",
+    "hint": "report_only=只记录；repair=发送前修复；block=阻止本次请求并给出 dump 路径。",
+    "default": "report_only",
+    "enum": ["report_only", "repair", "block"]
+  },
+  "repair_strategy": {
+    "type": "string",
+    "description": "修复策略",
+    "hint": "drop=删除空 assistant；placeholder=替换为空消息占位文本。通常推荐 drop。",
+    "default": "drop",
+    "enum": ["drop", "placeholder"]
+  },
+  "drop_orphan_tool_messages": {
+    "type": "bool",
+    "description": "修复时删除孤立 tool 消息",
+    "hint": "当空 assistant 后面紧跟 tool 消息时，通常代表 assistant 的 tool_calls 丢了；保留这些 tool 消息可能引发下一类 400。",
+    "default": true
+  },
+  "sync_context_query_after_repair": {
+    "type": "bool",
+    "description": "修复后同步 provider 内部 context_query",
+    "hint": "开启后可避免 provider 重试分支再次使用未修复的消息列表。",
+    "default": true
+  },
+  "assistant_placeholder_text": {
+    "type": "string",
+    "description": "placeholder 策略使用的占位文本",
+    "default": "[Empty assistant message removed before provider request.]"
+  },
+  "inspect_agent_context": {
+    "type": "bool",
+    "description": "检查 Agent 开始/结束时的 run_context.messages",
+    "hint": "用于判断空 assistant 是否已经存在于会话历史或 Agent 保存前状态。",
+    "default": true
+  },
+  "inspect_request_context": {
+    "type": "bool",
+    "description": "检查 ProviderRequest.contexts",
+    "hint": "用于定位 on_llm_request hook 阶段前后是否出现空 assistant。",
+    "default": true
+  },
+  "record_tool_events": {
+    "type": "bool",
+    "description": "记录最近的 LLM 工具调用",
+    "hint": "用于把空 assistant 与最近执行的工具、工具所属插件、工具结果是否为空关联起来。",
+    "default": true
+  },
+  "mark_empty_agent_messages_no_save": {
+    "type": "bool",
+    "description": "Agent 结束时标记空 assistant 不入历史",
+    "hint": "实验性选项。开启后会给 run_context.messages 中的空 assistant 设置 _no_save=True，避免污染后续历史。",
+    "default": false
+  },
+  "remember_last_sessions": {
+    "type": "int",
+    "description": "内存中保留多少个会话的最近记录",
+    "default": 50,
+    "min": 0,
+    "max": 200
+  },
+  "recent_tool_limit": {
+    "type": "int",
+    "description": "每个会话保留多少条最近工具事件",
+    "default": 12,
+    "min": 1,
+    "max": 50
+  },
+  "detail_preview_limit": {
+    "type": "int",
+    "description": "dump 摘要中保留多少条消息预览",
+    "default": 8,
+    "min": 1,
+    "max": 30
+  },
+  "preview_chars": {
+    "type": "int",
+    "description": "文本预览最大字符数",
+    "default": 160,
+    "min": 32,
+    "max": 1000
+  },
+  "tool_preview_chars": {
+    "type": "int",
+    "description": "工具参数和结果预览最大字符数",
+    "default": 240,
+    "min": 32,
+    "max": 2000
+  },
+  "status_finding_limit": {
+    "type": "int",
+    "description": "状态命令中最多显示多少条异常消息",
+    "default": 3,
+    "min": 1,
+    "max": 10
+  },
+  "status_tool_limit": {
+    "type": "int",
+    "description": "状态命令中最多显示多少个最近工具事件",
+    "default": 4,
+    "min": 0,
+    "max": 12
+  }
+}
