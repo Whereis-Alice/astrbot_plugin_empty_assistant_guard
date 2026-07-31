@@ -20,7 +20,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.1.4"
+PLUGIN_VERSION = "0.1.5"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -107,6 +107,8 @@ class AuditState:
     provider_model: str = ""
     provider_action: str = "repair"
     blocked: bool = False
+    provider_error: str = ""
+    provider_error_count: int = 0
 
 
 class TrackedRequestList(list[Any]):
@@ -592,13 +594,48 @@ class EmptyAssistantGuardPlugin(Star):
             return None
 
         state = self._state_for_provider(provider) or self._latest_state()
-        before_messages = payloads.get("messages", []) or []
+        payload_messages = payloads.get("messages", []) or []
+        context_messages = context_query if isinstance(context_query, list) else []
+        payload_findings = self._find_bad_assistant_messages(payload_messages)
+        context_findings = self._find_bad_assistant_messages(context_messages)
+        if state is not None:
+            state.provider_model = str(payloads.get("model") or state.provider_model)
+            state.provider_action = self._provider_action()
+            state.provider_error = str(error)
+            state.provider_error_count += 1
+            self._append_dump_event(
+                state,
+                "provider_api_error",
+                {
+                    "error": str(error),
+                    "payload_bad_count": len(payload_findings),
+                    "context_bad_count": len(context_findings),
+                    "payload_message_previews": [
+                        self._preview_value(item)
+                        for item in list(payload_messages)[: self._cfg_int("detail_preview_limit", 8)]
+                    ],
+                    "context_message_previews": [
+                        self._preview_value(item)
+                        for item in list(context_messages)[: self._cfg_int("detail_preview_limit", 8)]
+                    ],
+                },
+            )
+            self._record_phase(state, "provider_error", payload_messages)
+            self._remember_state(state)
+            if not payload_findings and not context_findings:
+                logger.warning(
+                    "[%s] matched empty-assistant API error, but no invalid assistant was "
+                    "visible in payload/context; dump=%s",
+                    PLUGIN_ID,
+                    state.dump_dir,
+                )
+
         changed = self._repair_or_block_payload(
             state=state,
             payloads=payloads,
             context_query=context_query,
             phase="provider_error_retry",
-            before_messages=before_messages,
+            before_messages=payload_messages,
         )
         if not changed:
             return None
@@ -628,6 +665,11 @@ class EmptyAssistantGuardPlugin(Star):
     ) -> bool:
         messages = payloads.get("messages", []) or []
         findings = self._find_bad_assistant_messages(messages)
+        if not findings and isinstance(context_query, list):
+            context_findings = self._find_bad_assistant_messages(context_query)
+            if context_findings:
+                messages = context_query
+                findings = context_findings
         if not findings:
             return False
 
@@ -659,7 +701,7 @@ class EmptyAssistantGuardPlugin(Star):
                 repair = RepairRecord(
                     phase=phase,
                     action=f"repair:{strategy}",
-                    before_messages=len(list(before_messages or [])),
+                    before_messages=len(list(messages or before_messages or [])),
                     after_messages=len(repaired_messages),
                     changes=changes,
                 )
@@ -1286,12 +1328,22 @@ class EmptyAssistantGuardPlugin(Star):
         )
 
     def _source_hint(self, state: AuditState) -> str:
-        mutation_sources = [
+        introduced_sources = [
             item.source for item in state.mutations if item.introduced_bad_assistant
-        ] or [item.source for item in state.mutations]
+        ]
+        if introduced_sources:
+            top = Counter(introduced_sources).most_common(3)
+            return "request hook introduced empty assistant: " + ", ".join(
+                f"{source} x{count}" for source, count in top
+            )
+
+        mutation_sources = [item.source for item in state.mutations]
         if mutation_sources:
             top = Counter(mutation_sources).most_common(3)
-            return "request hook mutation: " + ", ".join(f"{source} x{count}" for source, count in top)
+            return (
+                "request hook mutation observed, but no empty assistant was detected: "
+                + ", ".join(f"{source} x{count}" for source, count in top)
+            )
 
         bad_phases = [phase.phase for phase in state.phases if phase.bad_count > 0]
         if bad_phases:
@@ -1325,6 +1377,9 @@ class EmptyAssistantGuardPlugin(Star):
             ),
             f"source_hint: {self._source_hint(state)}",
         ]
+        if state.provider_error:
+            lines.append(f"provider_error_count: {state.provider_error_count}")
+            lines.append(f"last_provider_error: {self._preview_text(state.provider_error, limit=1000)}")
         if latest_bad:
             for finding in latest_bad.findings[: self._cfg_int("status_finding_limit", 3)]:
                 lines.append(
@@ -1412,8 +1467,10 @@ class EmptyAssistantGuardPlugin(Star):
             return payloads, context_query
 
         def sanitize_assistant_messages_wrapper(payloads: dict[str, Any]) -> None:
-            _PATCH_ORIGINALS["_sanitize_assistant_messages"](payloads)
             plugin = _ACTIVE_PLUGIN
+            if plugin is not None:
+                plugin.on_provider_payload_sanitize(payloads)
+            _PATCH_ORIGINALS["_sanitize_assistant_messages"](payloads)
             if plugin is not None:
                 plugin.on_provider_payload_sanitize(payloads)
 

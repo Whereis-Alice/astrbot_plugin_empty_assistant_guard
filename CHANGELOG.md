@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.5
+
+- Recorded matching empty-assistant API errors even when the final payload no longer exposed a detectable empty assistant.
+- Added retry-time inspection and repair of `context_query`, which may retain the pre-sanitized messages after AstrBot replaces `payloads["messages"]`.
+- Ran the plugin sanitizer before and after AstrBot's built-in assistant sanitizer.
+- Added `provider_error_count` and `last_provider_error` to status output.
+- Clarified source hints when request hooks mutated context but no empty assistant was found.
+
 ## 0.1.4
 
 - Added a Runner fallback state when TokenRouter or another provider path does not expose a usable `ProviderRequest` binding.

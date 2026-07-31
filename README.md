@@ -24,6 +24,8 @@ AstrBot 的一条用户消息可能连续产生多次 LLM 请求，例如主模�
 
 对于没有经过标准 `ProviderRequest` hook 的 Agent Runner 请求，插件会直接从 Runner 的 Provider ID、模型名和当前事件创建独立记录，适用于 TokenRouter 这类路径。
 
+如果上游仍返回空 assistant 400，即使当前 payload 已经被 AstrBot 内置清理过，插件也会记录 `provider_error`、原始上下文摘要和 dump 路径；状态中的 `last_provider_error` 表示这条请求确实失败过，不会再显示成普通的 `bad_messages=0` 请求。
+
 dump 文件保存在：
 
 ```text
