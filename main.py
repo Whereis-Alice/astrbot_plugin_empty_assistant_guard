@@ -20,7 +20,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.1.3"
+PLUGIN_VERSION = "0.1.4"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -32,6 +32,7 @@ PREVIEW_FALLBACK = "-"
 
 _ACTIVE_PLUGIN: "EmptyAssistantGuardPlugin | None" = None
 _PATCHED = False
+_RUNNER_PATCHED = False
 _PATCH_ORIGINALS: dict[str, Any] = {}
 _PATCH_CLASSES: dict[str, Any] = {}
 _PATCH_WRAPPERS: dict[str, Any] = {}
@@ -430,7 +431,7 @@ class EmptyAssistantGuardPlugin(Star):
         if not self._cfg_bool("enabled", True):
             return contexts
 
-        state = self._state_for_runner(runner)
+        state = self._state_for_runner(runner) or self._new_runner_state(runner)
         provider_id = self._runner_provider_id(runner)
         action = self._provider_action()
         if state is not None:
@@ -815,26 +816,53 @@ class EmptyAssistantGuardPlugin(Star):
         state = getattr(req, STATE_ATTR, None)
         if isinstance(state, AuditState):
             return state
-        session_id = self._session_key(getattr(req, "session_id", "") or "")
-        if session_id:
-            state = self._last_state_by_session.get(session_id)
-            if state is not None:
-                return state
-        event = getattr(getattr(getattr(runner, "run_context", None), "context", None), "event", None)
-        umo = getattr(event, "unified_msg_origin", "")
-        if umo:
-            return self._last_state_by_umo.get(str(umo))
-        return self._latest_state()
+        return None
+
+    def _runner_event(self, runner: Any) -> AstrMessageEvent | None:
+        event = getattr(
+            getattr(getattr(runner, "run_context", None), "context", None),
+            "event",
+            None,
+        )
+        if isinstance(event, AstrMessageEvent):
+            return event
+        return event
+
+    def _new_runner_state(self, runner: Any) -> AuditState | None:
+        req = getattr(runner, "req", None)
+        event = self._runner_event(runner)
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        if not umo:
+            return None
+        state = self._new_state(
+            umo,
+            session_id=self._session_key(getattr(req, "session_id", "") or ""),
+        )
+        if event is not None:
+            self._set_state_on_event(event, state)
+        if req is not None:
+            self._set_state_on_request(req, state)
+        self._attach_recent_tools(state, umo)
+        self._remember_state(state)
+        return state
 
     def _runner_provider_id(self, runner: Any) -> str:
         provider = getattr(runner, "provider", None)
         provider_config = getattr(provider, "provider_config", None)
         values: list[str] = []
         if isinstance(provider_config, dict):
-            for key in ("id", "model", "model_name"):
+            for key in ("id", "provider", "model", "model_name"):
                 value = provider_config.get(key)
                 if value:
                     values.append(str(value))
+        get_model = getattr(provider, "get_model", None)
+        if callable(get_model):
+            try:
+                value = get_model()
+            except Exception:
+                value = ""
+            if value:
+                values.append(str(value))
         for attr in ("model", "model_name"):
             value = getattr(provider, attr, "")
             if value:
@@ -849,6 +877,7 @@ class EmptyAssistantGuardPlugin(Star):
             folded = value.casefold()
             if any(folded in existing.casefold() for existing in unique):
                 continue
+            unique = [existing for existing in unique if existing.casefold() not in folded]
             unique.append(value)
         return "/".join(unique)
 
@@ -1291,8 +1320,8 @@ class EmptyAssistantGuardPlugin(Star):
             f"provider_action: {state.provider_action}",
             (
                 "patches: "
-                f"runner={self._cfg_bool('patch_agent_runner', True)}, "
-                f"openai_provider={self._cfg_bool('patch_openai_provider', True)}"
+                f"runner=config:{self._cfg_bool('patch_agent_runner', True)},installed:{_RUNNER_PATCHED}; "
+                f"openai_provider=config:{self._cfg_bool('patch_openai_provider', True)},installed:{_PATCHED}"
             ),
             f"source_hint: {self._source_hint(state)}",
         ]
@@ -1457,6 +1486,7 @@ class EmptyAssistantGuardPlugin(Star):
         logger.info("[%s] patched ProviderOpenAIOfficial", PLUGIN_ID)
 
     def _apply_runner_patches(self) -> None:
+        global _RUNNER_PATCHED
         try:
             from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
         except Exception as exc:
@@ -1512,10 +1542,11 @@ class EmptyAssistantGuardPlugin(Star):
                 complete_with_assistant_response_wrapper
             )
 
+        _RUNNER_PATCHED = True
         logger.info("[%s] patched ToolLoopAgentRunner", PLUGIN_ID)
 
     def _restore_provider_patches(self) -> None:
-        global _PATCHED
+        global _PATCHED, _RUNNER_PATCHED
         provider_cls = _PATCH_CLASSES.get("ProviderOpenAIOfficial")
         if provider_cls is not None:
             for name in (
@@ -1553,6 +1584,7 @@ class EmptyAssistantGuardPlugin(Star):
                 request_cls.__setattr__ = original
 
         _PATCHED = False
+        _RUNNER_PATCHED = False
 
     def _safe_json(self, value: Any) -> str:
         try:

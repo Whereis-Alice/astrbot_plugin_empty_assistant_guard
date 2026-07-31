@@ -22,6 +22,8 @@ Assistant messages must contain text, reasoning content, or tool_calls.
 
 AstrBot 的一条用户消息可能连续产生多次 LLM 请求，例如主模型调用工具、工具执行后再次请求主模型，以及表情包插件单独调用 DeepSeek。插件会为每个会话保留最近多次请求，后续辅助模型不会再覆盖 Kimi 的状态。
 
+对于没有经过标准 `ProviderRequest` hook 的 Agent Runner 请求，插件会直接从 Runner 的 Provider ID、模型名和当前事件创建独立记录，适用于 TokenRouter 这类路径。
+
 dump 文件保存在：
 
 ```text

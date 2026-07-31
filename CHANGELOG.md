@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.4
+
+- Added a Runner fallback state when TokenRouter or another provider path does not expose a usable `ProviderRequest` binding.
+- Added provider/model extraction from Runner provider config, `get_model()`, and request model fields.
+- Prevented a stale Gemini state from being reused as the current Kimi request.
+- Added installed-patch status to the diagnostic output so `runner=config:true` is no longer confused with a successfully installed patch.
+
 ## 0.1.3
 
 - Kept a bounded history of recent LLM requests for each conversation instead of exposing only the last auxiliary-model request.
