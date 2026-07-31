@@ -1,5 +1,13 @@
 # 更新日志
 
+## 0.2.0
+
+- 增加 request hook 级别的上下文前后快照，记录具体插件 handler 修改了哪些消息。
+- 当某个 handler 首次引入空 assistant 时，在来源提示和 dump 中标出该 handler。
+- 增加真正调用 OpenAI 客户端前的最终消息摘要，区分本地插件链、AstrBot/OpenAI 序列化和 TokenRouter 上游转换问题。
+- 增加 `capture_hook_diffs` 配置项，默认开启，只记录摘要和预览。
+- 状态增加最终客户端 payload 的请求次数、异常消息数和消息数。
+
 ## 0.1.9
 
 - 增加 `status_only_errors` 配置项，默认让状态和 dump 指令只显示发生过 Provider 错误的请求。

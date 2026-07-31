@@ -50,6 +50,7 @@ fallback_repair_on_unmatched_api_error = true
 fallback_repair_max_attempts = 3
 status_model_keywords = kimi,moonshot
 status_only_errors = true
+capture_hook_diffs = true
 recent_request_limit = 20
 ```
 
@@ -58,6 +59,8 @@ recent_request_limit = 20
 `status_model_keywords` 只控制 `status` 和 `dump` 显示哪一个模型的最近记录，不会缩小守卫的检测与修复范围。留空可恢复为显示所有模型。
 
 `status_only_errors` 默认开启，状态和 dump 指令只显示发生过 Provider 错误的请求；普通成功请求或只在发送前修复的请求不会覆盖错误记录。关闭后可恢复查看所有发生过异常、修复或拦截的请求。
+
+`capture_hook_diffs` 默认开启，会逐个记录 `OnLLMRequestEvent` handler 前后的 `ProviderRequest.contexts` 差异，并在最终调用 OpenAI 客户端前记录消息摘要。若 `source_hint` 显示某个 handler 首次引入空 assistant，优先检查该插件；若最终客户端 payload 仍干净但 Kimi 继续报错，问题更可能发生在 OpenAI SDK、TokenRouter 或上游转换层。
 
 如果上游已经把异常消息清理掉，但仍返回明确的 `Assistant messages must contain text, reasoning content, or tool_calls.`，默认的 `fallback_repair_on_unmatched_api_error` 会在本次请求重试前逐次删除请求副本中的最近一条 `assistant`，并删除其后紧邻的孤立 `tool`。`fallback_repair_max_attempts` 默认最多尝试 3 次，达到上限后停止，不会修改已保存的正常会话历史；关闭第一个选项即可停用这个兜底。
 

@@ -74,6 +74,12 @@
     "hint": "用于定位 on_llm_request hook 阶段前后是否出现空 assistant。",
     "default": true
   },
+  "capture_hook_diffs": {
+    "type": "bool",
+    "description": "记录每个 request hook 前后的上下文差异",
+    "hint": "开启后会标出具体插件 handler 是否修改了 contexts，以及是否首次引入空 assistant。只记录摘要和预览。",
+    "default": true
+  },
   "record_tool_events": {
     "type": "bool",
     "description": "记录最近的 LLM 工具调用",

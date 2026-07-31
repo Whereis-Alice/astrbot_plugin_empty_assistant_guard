@@ -20,7 +20,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.1.9"
+PLUGIN_VERSION = "0.2.0"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -36,6 +36,9 @@ _RUNNER_PATCHED = False
 _PATCH_ORIGINALS: dict[str, Any] = {}
 _PATCH_CLASSES: dict[str, Any] = {}
 _PATCH_WRAPPERS: dict[str, Any] = {}
+_HOOK_HANDLER_PATCHES: dict[str, tuple[Any, Any, Any]] = {}
+_HTTP_PROVIDER_BY_COMPLETIONS: dict[int, Any] = {}
+_HTTP_PROVIDER_BY_CLIENT: dict[int, Any] = {}
 
 
 @dataclass
@@ -112,6 +115,9 @@ class AuditState:
     fallback_repair_attempted: bool = False
     fallback_repair_payload_id: int | None = None
     fallback_repair_attempt_count: int = 0
+    wire_request_count: int = 0
+    wire_bad_count: int = 0
+    wire_message_count: int = 0
 
 
 class TrackedRequestList(list[Any]):
@@ -197,6 +203,8 @@ class EmptyAssistantGuardPlugin(Star):
             self._apply_provider_patches()
         if self._cfg_bool("patch_agent_runner", True):
             self._apply_runner_patches()
+        if self._cfg_bool("inspect_request_context", True):
+            self._apply_hook_forensics_patches()
         if self._provider_action() == "report_only":
             logger.warning(
                 "[%s] 当前配置 provider_action=report_only：只记录，不会修复空 assistant；"
@@ -207,6 +215,7 @@ class EmptyAssistantGuardPlugin(Star):
 
     async def terminate(self) -> None:
         self._restore_provider_patches()
+        self._restore_hook_forensics_patches()
         self._clear_active()
         logger.info("[%s] terminated", PLUGIN_ID)
 
@@ -428,6 +437,132 @@ class EmptyAssistantGuardPlugin(Star):
         )
         state.mutations.append(record)
         self._append_dump_event(state, "request_assignment", asdict(record))
+
+    def record_hook_context_diff(
+        self,
+        event: AstrMessageEvent,
+        req: Any,
+        before: list[dict[str, Any]],
+        after: list[dict[str, Any]],
+        *,
+        handler_module: str,
+        handler_name: str,
+        handler: Any,
+    ) -> None:
+        if not self._cfg_bool("enabled", True):
+            return
+        state = getattr(req, STATE_ATTR, None)
+        if not isinstance(state, AuditState):
+            state = self._event_state(event)
+        if state is None:
+            return
+
+        changed_indices = [
+            index
+            for index in range(max(len(before), len(after)))
+            if self._safe_json(before[index] if index < len(before) else None)
+            != self._safe_json(after[index] if index < len(after) else None)
+        ]
+        if not changed_indices:
+            return
+
+        before_findings = self._find_bad_assistant_messages(before)
+        after_findings = self._find_bad_assistant_messages(after)
+        before_bad = {(item.index, item.reason) for item in before_findings}
+        after_bad = {(item.index, item.reason) for item in after_findings}
+        introduced_bad = bool(after_bad - before_bad) or bool(after_bad and not before_bad)
+        source = self._handler_source(handler, handler_module, handler_name)
+        record = MutationRecord(
+            channel="request.contexts.hook",
+            action=f"hook:{handler_name}",
+            source=source,
+            count=len(changed_indices),
+            preview=(
+                f"messages {len(before)}->{len(after)}; "
+                f"changed_indices={changed_indices[:12]}"
+            ),
+            introduced_bad_assistant=introduced_bad,
+        )
+        state.mutations.append(record)
+        self._append_dump_event(
+            state,
+            "hook_context_diff",
+            {
+                "handler_module": handler_module,
+                "handler": handler_name,
+                "source": source,
+                "before_count": len(before),
+                "after_count": len(after),
+                "changed_indices": changed_indices,
+                "introduced_bad_assistant": introduced_bad,
+                "before_assistant_messages": self._assistant_message_summaries(before),
+                "after_assistant_messages": self._assistant_message_summaries(after),
+            },
+        )
+        self._remember_state(state)
+
+    def on_provider_http_payload(
+        self,
+        provider: Any,
+        request_kwargs: dict[str, Any],
+    ) -> None:
+        if not self._cfg_bool("enabled", True):
+            return
+        state = self._state_for_provider(provider) or self._latest_state()
+        if state is None:
+            return
+
+        messages = request_kwargs.get("messages", []) or []
+        state.provider_model = str(request_kwargs.get("model") or state.provider_model)
+        state.wire_request_count += 1
+        state.wire_message_count = len(messages) if isinstance(messages, list) else 0
+        phase = self._record_phase(state, "provider_http_request", messages)
+        state.wire_bad_count = phase.bad_count
+        self._append_dump_event(
+            state,
+            "provider_http_payload",
+            {
+                "model": state.provider_model,
+                "request_keys": sorted(str(key) for key in request_kwargs),
+                "message_count": state.wire_message_count,
+                "bad_count": phase.bad_count,
+                "assistant_messages": self._assistant_message_summaries(messages),
+            },
+        )
+        self._remember_state(state)
+
+        if phase.bad_count:
+            logger.warning(
+                "[%s] invalid assistant still present immediately before OpenAI client; "
+                "bad=%s model=%s dump=%s",
+                PLUGIN_ID,
+                phase.bad_count,
+                state.provider_model or PREVIEW_FALLBACK,
+                state.dump_dir,
+            )
+            self._repair_or_block_payload(
+                state=state,
+                payloads=request_kwargs,
+                context_query=None,
+                phase="provider_http_request",
+                before_messages=messages,
+            )
+
+    def _snapshot_request_contexts(self, req: Any) -> list[dict[str, Any]]:
+        contexts = getattr(req, "contexts", []) or []
+        try:
+            return [copy.deepcopy(self._ensure_message_dict(item)) for item in list(contexts)]
+        except Exception:
+            return []
+
+    def _handler_source(self, handler: Any, module: str, name: str) -> str:
+        try:
+            path = Path(inspect.getfile(handler)).resolve()
+            function = getattr(handler, "__func__", handler)
+            line = int(getattr(getattr(function, "__code__", None), "co_firstlineno", 0) or 0)
+            return self._format_source(path, line, name)
+        except Exception:
+            return f"{module}:{name}"
 
     def sanitize_runner_contexts(
         self,
@@ -1579,6 +1714,17 @@ class EmptyAssistantGuardPlugin(Star):
                 f"{source} x{count}" for source, count in top
             )
 
+        if state.wire_request_count and state.provider_error:
+            if state.wire_bad_count:
+                return (
+                    "empty assistant was still present immediately before the OpenAI client; "
+                    "inspect hook_context_diff and provider_http_payload"
+                )
+            return (
+                "final OpenAI client payload had no detectable empty assistant; "
+                "inspect TokenRouter/OpenAI serialization or upstream transformation"
+            )
+
         mutation_sources = [item.source for item in state.mutations]
         if mutation_sources:
             top = Counter(mutation_sources).most_common(3)
@@ -1623,6 +1769,13 @@ class EmptyAssistantGuardPlugin(Star):
         if state.provider_error:
             lines.append(f"provider_error_count: {state.provider_error_count}")
             lines.append(f"last_provider_error: {self._preview_text(state.provider_error, limit=1000)}")
+        if state.wire_request_count:
+            lines.append(
+                "wire_payload: "
+                f"requests={state.wire_request_count}, "
+                f"last_bad_messages={state.wire_bad_count}, "
+                f"last_message_count={state.wire_message_count}"
+            )
         if latest_bad:
             for finding in latest_bad.findings[: self._cfg_int("status_finding_limit", 3)]:
                 lines.append(
@@ -1660,6 +1813,76 @@ class EmptyAssistantGuardPlugin(Star):
         if _ACTIVE_PLUGIN is self:
             _ACTIVE_PLUGIN = None
 
+    def _apply_hook_forensics_patches(self) -> None:
+        try:
+            from astrbot.core.star.register.star_handler import EventType, star_handlers_registry
+        except Exception as exc:
+            logger.warning("[%s] failed to patch request hook forensics: %s", PLUGIN_ID, exc)
+            return
+
+        for metadata in list(getattr(star_handlers_registry, "_handlers", [])):
+            if metadata.event_type != EventType.OnLLMRequestEvent:
+                continue
+            if str(metadata.handler_module_path).startswith(PLUGIN_ID):
+                continue
+            key = f"hook:{metadata.handler_full_name}"
+            if key in _HOOK_HANDLER_PATCHES:
+                continue
+            original = metadata.handler
+            if not inspect.iscoroutinefunction(original):
+                continue
+
+            async def traced_handler(
+                event: AstrMessageEvent,
+                *args: Any,
+                _original: Any = original,
+                _metadata: Any = metadata,
+                **kwargs: Any,
+            ) -> Any:
+                plugin = _ACTIVE_PLUGIN
+                req = args[0] if args else None
+                before = (
+                    plugin._snapshot_request_contexts(req)
+                    if plugin is not None
+                    and plugin._cfg_bool("capture_hook_diffs", True)
+                    and req is not None
+                    else []
+                )
+                try:
+                    return await _original(event, *args, **kwargs)
+                finally:
+                    if (
+                        plugin is not None
+                        and plugin._cfg_bool("capture_hook_diffs", True)
+                        and req is not None
+                    ):
+                        after = plugin._snapshot_request_contexts(req)
+                        plugin.record_hook_context_diff(
+                            event,
+                            req,
+                            before,
+                            after,
+                            handler_module=str(_metadata.handler_module_path),
+                            handler_name=str(_metadata.handler_name),
+                            handler=_original,
+                        )
+
+            metadata.handler = traced_handler
+            _HOOK_HANDLER_PATCHES[key] = (metadata, original, traced_handler)
+
+        if _HOOK_HANDLER_PATCHES:
+            logger.info(
+                "[%s] wrapped %s OnLLMRequestEvent handlers for context forensics",
+                PLUGIN_ID,
+                len(_HOOK_HANDLER_PATCHES),
+            )
+
+    def _restore_hook_forensics_patches(self) -> None:
+        for metadata, original, wrapper in list(_HOOK_HANDLER_PATCHES.values()):
+            if getattr(metadata, "handler", None) is wrapper:
+                metadata.handler = original
+        _HOOK_HANDLER_PATCHES.clear()
+
     def _apply_provider_patches(self) -> None:
         global _PATCHED
         if _PATCHED:
@@ -1679,6 +1902,8 @@ class EmptyAssistantGuardPlugin(Star):
             ProviderOpenAIOfficial._sanitize_assistant_messages
         )
         _PATCH_ORIGINALS["_handle_api_error"] = ProviderOpenAIOfficial._handle_api_error
+        _PATCH_ORIGINALS["_query"] = ProviderOpenAIOfficial._query
+        _PATCH_ORIGINALS["_query_stream"] = ProviderOpenAIOfficial._query_stream
         _PATCH_ORIGINALS["ProviderRequest.__setattr__"] = getattr(ProviderRequest, "__setattr__")
         _PATCH_CLASSES["ProviderRequest"] = ProviderRequest
 
@@ -1702,6 +1927,47 @@ class EmptyAssistantGuardPlugin(Star):
                     yield chunk
             finally:
                 setattr(provider, f"_{PLUGIN_ID}_current_session_id", "")
+
+        async def query_wrapper(provider: Any, *args: Any, **kwargs: Any) -> Any:
+            completions = None
+            try:
+                completions = provider.client.chat.completions
+            except Exception:
+                pass
+            if completions is not None:
+                _HTTP_PROVIDER_BY_COMPLETIONS[id(completions)] = provider
+                client = getattr(completions, "_client", None)
+                if client is not None:
+                    _HTTP_PROVIDER_BY_CLIENT[id(client)] = provider
+            try:
+                return await _PATCH_ORIGINALS["_query"](provider, *args, **kwargs)
+            finally:
+                if completions is not None:
+                    _HTTP_PROVIDER_BY_COMPLETIONS.pop(id(completions), None)
+                    client = getattr(completions, "_client", None)
+                    if client is not None:
+                        _HTTP_PROVIDER_BY_CLIENT.pop(id(client), None)
+
+        async def query_stream_wrapper(provider: Any, *args: Any, **kwargs: Any):
+            completions = None
+            try:
+                completions = provider.client.chat.completions
+            except Exception:
+                pass
+            if completions is not None:
+                _HTTP_PROVIDER_BY_COMPLETIONS[id(completions)] = provider
+                client = getattr(completions, "_client", None)
+                if client is not None:
+                    _HTTP_PROVIDER_BY_CLIENT[id(client)] = provider
+            try:
+                async for chunk in _PATCH_ORIGINALS["_query_stream"](provider, *args, **kwargs):
+                    yield chunk
+            finally:
+                if completions is not None:
+                    _HTTP_PROVIDER_BY_COMPLETIONS.pop(id(completions), None)
+                    client = getattr(completions, "_client", None)
+                    if client is not None:
+                        _HTTP_PROVIDER_BY_CLIENT.pop(id(client), None)
 
         async def prepare_chat_payload_wrapper(provider: Any, *args: Any, **kwargs: Any) -> tuple[Any, Any]:
             payloads, context_query = await _PATCH_ORIGINALS["_prepare_chat_payload"](
@@ -1772,8 +2038,40 @@ class EmptyAssistantGuardPlugin(Star):
             if plugin is not None:
                 plugin.record_assignment(req, name, value)
 
+        try:
+            from openai.resources.chat.completions import AsyncCompletions
+
+            _PATCH_CLASSES["AsyncCompletions"] = AsyncCompletions
+            _PATCH_ORIGINALS["AsyncCompletions.create"] = AsyncCompletions.create
+
+            async def completions_create_wrapper(
+                completions: Any,
+                *args: Any,
+                **kwargs: Any,
+            ) -> Any:
+                plugin = _ACTIVE_PLUGIN
+                provider = _HTTP_PROVIDER_BY_COMPLETIONS.get(id(completions))
+                if provider is None:
+                    provider = _HTTP_PROVIDER_BY_CLIENT.get(
+                        id(getattr(completions, "_client", None))
+                    )
+                if plugin is not None and provider is not None:
+                    plugin.on_provider_http_payload(provider, kwargs)
+                return await _PATCH_ORIGINALS["AsyncCompletions.create"](
+                    completions,
+                    *args,
+                    **kwargs,
+                )
+
+            AsyncCompletions.create = completions_create_wrapper
+            _PATCH_WRAPPERS["AsyncCompletions.create"] = completions_create_wrapper
+        except Exception as exc:
+            logger.warning("[%s] final HTTP payload patch unavailable: %s", PLUGIN_ID, exc)
+
         ProviderOpenAIOfficial.text_chat = text_chat_wrapper
         ProviderOpenAIOfficial.text_chat_stream = text_chat_stream_wrapper
+        ProviderOpenAIOfficial._query = query_wrapper
+        ProviderOpenAIOfficial._query_stream = query_stream_wrapper
         ProviderOpenAIOfficial._prepare_chat_payload = prepare_chat_payload_wrapper
         ProviderOpenAIOfficial._sanitize_assistant_messages = staticmethod(
             sanitize_assistant_messages_wrapper
@@ -1783,6 +2081,8 @@ class EmptyAssistantGuardPlugin(Star):
 
         _PATCH_WRAPPERS["text_chat"] = text_chat_wrapper
         _PATCH_WRAPPERS["text_chat_stream"] = text_chat_stream_wrapper
+        _PATCH_WRAPPERS["_query"] = query_wrapper
+        _PATCH_WRAPPERS["_query_stream"] = query_stream_wrapper
         _PATCH_WRAPPERS["_prepare_chat_payload"] = prepare_chat_payload_wrapper
         _PATCH_WRAPPERS["_sanitize_assistant_messages"] = sanitize_assistant_messages_wrapper
         _PATCH_WRAPPERS["_handle_api_error"] = handle_api_error_wrapper
@@ -1857,6 +2157,8 @@ class EmptyAssistantGuardPlugin(Star):
             for name in (
                 "text_chat",
                 "text_chat_stream",
+                "_query",
+                "_query_stream",
                 "_prepare_chat_payload",
                 "_sanitize_assistant_messages",
                 "_handle_api_error",
@@ -1868,6 +2170,19 @@ class EmptyAssistantGuardPlugin(Star):
                         setattr(provider_cls, name, staticmethod(original))
                     else:
                         setattr(provider_cls, name, original)
+
+        completions_cls = _PATCH_CLASSES.get("AsyncCompletions")
+        completions_wrapper = _PATCH_WRAPPERS.get("AsyncCompletions.create")
+        completions_original = _PATCH_ORIGINALS.get("AsyncCompletions.create")
+        if (
+            completions_cls is not None
+            and completions_wrapper is not None
+            and completions_original is not None
+            and getattr(completions_cls, "create", None) is completions_wrapper
+        ):
+            completions_cls.create = completions_original
+        _HTTP_PROVIDER_BY_COMPLETIONS.clear()
+        _HTTP_PROVIDER_BY_CLIENT.clear()
 
         runner_cls = _PATCH_CLASSES.get("ToolLoopAgentRunner")
         if runner_cls is not None:
