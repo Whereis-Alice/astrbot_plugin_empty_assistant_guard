@@ -11,6 +11,7 @@ Assistant messages must contain text, reasoning content, or tool_calls.
 - `agent_begin` / `agent_done`: Agent 的 `run_context.messages`
 - `request_early` / `request_late`: `ProviderRequest.contexts`
 - `provider_prepare`: OpenAI 兼容 Provider 真正发给上游前的 `payloads["messages"]`
+- `provider_http_serialized_payload`: OpenAI SDK 已将请求转换为 HTTP JSON 后、HTTPX 发送前的消息摘要
 - `tool_start` / `tool_result`: 最近执行过的 LLM 工具、工具所属插件和工具结果摘要
 
 ## 命令
@@ -44,6 +45,7 @@ data/plugins/astrbot_plugin_empty_assistant_guard/requests/<umo-hash>-<request-i
 provider_action = repair
 patch_agent_runner = true
 patch_openai_provider = true
+capture_serialized_http_payload = true
 repair_strategy = drop
 drop_orphan_tool_messages = true
 fallback_repair_on_unmatched_api_error = true
@@ -59,9 +61,11 @@ recent_request_limit = 20
 
 `status_model_keywords` 只控制 `status` 和 `dump` 显示哪一个模型的最近记录，不会缩小守卫的检测与修复范围。留空可恢复为显示所有模型。
 
+如果一次 Agent 先请求 Kimi、报错后再回退 Gemini，状态中的 `provider_error_serialized_payload` 是发生错误的原始模型快照，不会被后续回退请求覆盖；`serialized_http_payload` 则表示当前记录最后一次实际发送的请求。
+
 `status_only_errors` 默认开启，状态和 dump 指令只显示发生过 Provider 错误的请求；普通成功请求或只在发送前修复的请求不会覆盖错误记录。关闭后可恢复查看所有发生过异常、修复或拦截的请求。
 
-`capture_hook_diffs` 默认开启，会逐个记录 `OnLLMRequestEvent` handler 前后的 `ProviderRequest.contexts` 差异，并在最终调用 OpenAI 客户端前记录消息摘要。若 `source_hint` 显示某个 handler 首次引入空 assistant，优先检查该插件；若最终客户端 payload 仍干净但 Kimi 继续报错，问题更可能发生在 OpenAI SDK、TokenRouter 或上游转换层。
+`capture_hook_diffs` 默认开启，会逐个记录 `OnLLMRequestEvent` handler 前后的 `ProviderRequest.contexts` 差异。`capture_serialized_http_payload` 默认开启，会在 OpenAI SDK 完成 JSON 序列化、HTTPX 发送前记录消息摘要、请求字段、请求体大小和 SHA-256 短哈希，不记录完整请求体或 API Key。若 `source_hint` 显示某个 handler 首次引入空 assistant，优先检查该插件；若 `provider_http_serialized_payload` 仍干净但 Kimi 继续报错，问题发生在 HTTP 请求之后，更可能是 TokenRouter 或上游转换层。
 
 如果 AstrBot 报告 `OpenAI completion has no usable output`，这是上游返回了空模型结果，不等同于请求中的空 assistant。状态命令会额外显示 `empty_output_count`、`last_empty_output` 和 `empty_output_response`，其中包含响应 ID、结束原因和 token 用量摘要。此类问题优先检查 TokenRouter/Kimi 转换层和上下文长度，不要继续增加 `fallback_repair_max_attempts`。
 
@@ -86,6 +90,6 @@ recent_request_limit = 20
 
 ## 兼容性说明
 
-插件使用轻量 monkey patch 观察 `ProviderOpenAIOfficial._prepare_chat_payload` 的最终 payload。卸载或停用插件时会尝试恢复 patch。若同时启用了其他 provider 诊断插件，建议先用 `report_only` 跑一轮确认行为。
+插件使用轻量 monkey patch 观察 `ProviderOpenAIOfficial._prepare_chat_payload`、OpenAI `AsyncCompletions.create()` 参数，以及 `AsyncAPIClient._send_request` 发送前已经序列化的 HTTP JSON。卸载或停用插件时会尝试恢复 patch。若同时启用了其他 provider 诊断插件，建议先用 `report_only` 跑一轮确认行为。
 
 0.2.3 起，OpenAI SDK 包装器会保留原始 `create()` 函数签名，并自动修复旧版本 patch 期间 Provider 缓存的参数元数据。若曾出现 `Missing required arguments; Expected either ('messages' and 'model')`，请至少升级到 0.2.3。

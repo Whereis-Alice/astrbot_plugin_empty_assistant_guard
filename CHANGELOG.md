@@ -1,5 +1,12 @@
 # 更新日志
 
+## 0.2.5
+
+- 新增 OpenAI SDK 序列化后的 HTTP JSON 观测，在 HTTPX 实际发送前检查最终消息列表。
+- 新增 `capture_serialized_http_payload` 配置项，对比客户端 payload 与序列化后的请求，帮助区分 AstrBot、OpenAI SDK 和 TokenRouter 的转换问题。
+- 仅记录消息摘要、请求字段、请求体大小和 SHA-256 短哈希，不记录完整请求体或 API Key。
+- 单独保存发生 Provider 错误时的序列化快照，避免后续 Gemini 回退请求覆盖 Kimi 的诊断结果。
+
 ## 0.2.4
 
 - 修复主模型报错后切换回退模型时覆盖错误模型名称，导致 `status_model_keywords` 无法找到 Kimi 错误记录的问题。

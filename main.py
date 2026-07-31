@@ -21,7 +21,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.2.4"
+PLUGIN_VERSION = "0.2.5"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -122,6 +122,15 @@ class AuditState:
     wire_request_count: int = 0
     wire_bad_count: int = 0
     wire_message_count: int = 0
+    serialized_wire_request_count: int = 0
+    serialized_wire_bad_count: int = 0
+    serialized_wire_message_count: int = 0
+    serialized_wire_model: str = ""
+    serialized_wire_parse_error: str = ""
+    provider_error_serialized_wire_request_count: int = 0
+    provider_error_serialized_wire_bad_count: int = 0
+    provider_error_serialized_wire_message_count: int = 0
+    provider_error_serialized_wire_model: str = ""
     empty_output_count: int = 0
     last_empty_output: str = ""
     last_empty_output_response: str = ""
@@ -555,6 +564,107 @@ class EmptyAssistantGuardPlugin(Star):
                 before_messages=messages,
             )
 
+    def on_provider_serialized_http_payload(
+        self,
+        provider: Any,
+        request: Any,
+    ) -> None:
+        """Inspect the JSON body after the OpenAI SDK has serialized it."""
+        if not self._cfg_bool("enabled", True):
+            return
+
+        state = self._state_for_provider(provider) or self._latest_state()
+        if state is None:
+            return
+
+        try:
+            raw_body = request.content
+        except Exception as exc:
+            state.serialized_wire_parse_error = f"request body unavailable: {exc}"
+            self._append_dump_event(
+                state,
+                "provider_http_serialized_payload",
+                {
+                    "parse_error": state.serialized_wire_parse_error,
+                },
+            )
+            self._remember_state(state)
+            return
+
+        if isinstance(raw_body, str):
+            raw_bytes = raw_body.encode("utf-8", errors="replace")
+        elif isinstance(raw_body, bytes):
+            raw_bytes = raw_body
+        else:
+            raw_bytes = bytes(raw_body or b"")
+
+        body_hash = hashlib.sha256(raw_bytes).hexdigest()[:16]
+        try:
+            decoded = json.loads(raw_bytes.decode("utf-8"))
+        except Exception as exc:
+            state.serialized_wire_parse_error = f"JSON decode failed: {exc}"
+            self._append_dump_event(
+                state,
+                "provider_http_serialized_payload",
+                {
+                    "parse_error": state.serialized_wire_parse_error,
+                    "body_bytes": len(raw_bytes),
+                    "body_sha256_16": body_hash,
+                },
+            )
+            self._remember_state(state)
+            return
+
+        if not isinstance(decoded, dict) or "messages" not in decoded:
+            return
+
+        messages = decoded.get("messages", []) or []
+        if not isinstance(messages, list):
+            state.serialized_wire_parse_error = "serialized messages is not a list"
+            self._append_dump_event(
+                state,
+                "provider_http_serialized_payload",
+                {
+                    "parse_error": state.serialized_wire_parse_error,
+                    "body_bytes": len(raw_bytes),
+                    "body_sha256_16": body_hash,
+                },
+            )
+            self._remember_state(state)
+            return
+
+        model = str(decoded.get("model") or state.provider_model)
+        state.serialized_wire_request_count += 1
+        state.serialized_wire_model = model
+        state.serialized_wire_message_count = len(messages)
+        state.serialized_wire_parse_error = ""
+        phase = self._record_phase(state, "provider_http_serialized_payload", messages)
+        state.serialized_wire_bad_count = phase.bad_count
+        self._append_dump_event(
+            state,
+            "provider_http_serialized_payload_meta",
+            {
+                "model": model,
+                "request_keys": sorted(str(key) for key in decoded),
+                "message_count": len(messages),
+                "bad_count": phase.bad_count,
+                "body_bytes": len(raw_bytes),
+                "body_sha256_16": body_hash,
+                "assistant_messages": self._assistant_message_summaries(messages),
+            },
+        )
+        self._remember_state(state)
+
+        if phase.bad_count:
+            logger.warning(
+                "[%s] serialized HTTP JSON contains %s invalid assistant message(s); "
+                "model=%s dump=%s",
+                PLUGIN_ID,
+                phase.bad_count,
+                model or PREVIEW_FALLBACK,
+                state.dump_dir,
+            )
+
     def on_provider_empty_output(
         self,
         provider: Any,
@@ -795,6 +905,14 @@ class EmptyAssistantGuardPlugin(Star):
             state.provider_error = str(error)
             state.provider_error_count += 1
             state.provider_error_model = state.provider_model
+            state.provider_error_serialized_wire_request_count = (
+                state.serialized_wire_request_count
+            )
+            state.provider_error_serialized_wire_bad_count = state.serialized_wire_bad_count
+            state.provider_error_serialized_wire_message_count = (
+                state.serialized_wire_message_count
+            )
+            state.provider_error_serialized_wire_model = state.serialized_wire_model
             self._append_dump_event(
                 state,
                 "provider_api_error",
@@ -813,6 +931,12 @@ class EmptyAssistantGuardPlugin(Star):
                     ],
                     "payload_assistant_messages": self._assistant_message_summaries(payload_messages),
                     "context_assistant_messages": self._assistant_message_summaries(context_messages),
+                    "serialized_http_payload": {
+                        "requests": state.provider_error_serialized_wire_request_count,
+                        "bad_count": state.provider_error_serialized_wire_bad_count,
+                        "message_count": state.provider_error_serialized_wire_message_count,
+                        "model": state.provider_error_serialized_wire_model,
+                    },
                 },
             )
             self._record_phase(state, "provider_error", payload_messages)
@@ -1879,7 +2003,21 @@ class EmptyAssistantGuardPlugin(Star):
             )
 
         if state.wire_request_count and state.provider_error:
-            if state.wire_bad_count:
+            serialized_request_count = (
+                state.provider_error_serialized_wire_request_count
+                or state.serialized_wire_request_count
+            )
+            serialized_bad_count = (
+                state.provider_error_serialized_wire_bad_count
+                if state.provider_error_serialized_wire_request_count
+                else state.serialized_wire_bad_count
+            )
+            if serialized_request_count and serialized_bad_count:
+                request_hint = (
+                    "invalid assistant appeared after OpenAI SDK serialization; "
+                    "inspect provider_http_serialized_payload and TokenRouter conversion"
+                )
+            elif state.wire_bad_count:
                 request_hint = (
                     "empty assistant was still present immediately before the OpenAI client; "
                     "inspect hook_context_diff and provider_http_payload"
@@ -1952,10 +2090,31 @@ class EmptyAssistantGuardPlugin(Star):
                 )
         if state.wire_request_count:
             lines.append(
-                "wire_payload: "
+                "openai_client_payload: "
                 f"requests={state.wire_request_count}, "
                 f"last_bad_messages={state.wire_bad_count}, "
                 f"last_message_count={state.wire_message_count}"
+            )
+        if state.serialized_wire_request_count:
+            lines.append(
+                "serialized_http_payload: "
+                f"requests={state.serialized_wire_request_count}, "
+                f"last_bad_messages={state.serialized_wire_bad_count}, "
+                f"last_message_count={state.serialized_wire_message_count}, "
+                f"model={state.serialized_wire_model or PREVIEW_FALLBACK}"
+            )
+        elif state.serialized_wire_parse_error:
+            lines.append(
+                "serialized_http_payload: unavailable, "
+                f"reason={self._preview_text(state.serialized_wire_parse_error, limit=300)}"
+            )
+        if state.provider_error_serialized_wire_request_count:
+            lines.append(
+                "provider_error_serialized_payload: "
+                f"requests={state.provider_error_serialized_wire_request_count}, "
+                f"bad_messages={state.provider_error_serialized_wire_bad_count}, "
+                f"message_count={state.provider_error_serialized_wire_message_count}, "
+                f"model={state.provider_error_serialized_wire_model or PREVIEW_FALLBACK}"
             )
         if latest_bad:
             for finding in latest_bad.findings[: self._cfg_int("status_finding_limit", 3)]:
@@ -2296,6 +2455,40 @@ class EmptyAssistantGuardPlugin(Star):
         except Exception as exc:
             logger.warning("[%s] final HTTP payload patch unavailable: %s", PLUGIN_ID, exc)
 
+        try:
+            from openai._base_client import AsyncAPIClient
+
+            original_send_request = getattr(AsyncAPIClient, "_send_request")
+            _PATCH_CLASSES["AsyncAPIClient"] = AsyncAPIClient
+            _PATCH_ORIGINALS["AsyncAPIClient._send_request"] = original_send_request
+
+            async def send_request_wrapper(
+                api_client: Any,
+                request: Any,
+                *,
+                stream: bool,
+                **kwargs: Any,
+            ) -> Any:
+                plugin = _ACTIVE_PLUGIN
+                provider = _HTTP_PROVIDER_BY_CLIENT.get(id(api_client))
+                if (
+                    plugin is not None
+                    and provider is not None
+                    and plugin._cfg_bool("capture_serialized_http_payload", True)
+                ):
+                    plugin.on_provider_serialized_http_payload(provider, request)
+                return await original_send_request(
+                    api_client,
+                    request,
+                    stream=stream,
+                    **kwargs,
+                )
+
+            AsyncAPIClient._send_request = send_request_wrapper
+            _PATCH_WRAPPERS["AsyncAPIClient._send_request"] = send_request_wrapper
+        except Exception as exc:
+            logger.warning("[%s] serialized HTTP payload patch unavailable: %s", PLUGIN_ID, exc)
+
         ProviderOpenAIOfficial.text_chat = text_chat_wrapper
         ProviderOpenAIOfficial.text_chat_stream = text_chat_stream_wrapper
         ProviderOpenAIOfficial._query = query_wrapper
@@ -2409,6 +2602,18 @@ class EmptyAssistantGuardPlugin(Star):
             and getattr(completions_cls, "create", None) is completions_wrapper
         ):
             completions_cls.create = completions_original
+
+        api_client_cls = _PATCH_CLASSES.get("AsyncAPIClient")
+        send_request_wrapper = _PATCH_WRAPPERS.get("AsyncAPIClient._send_request")
+        send_request_original = _PATCH_ORIGINALS.get("AsyncAPIClient._send_request")
+        if (
+            api_client_cls is not None
+            and send_request_wrapper is not None
+            and send_request_original is not None
+            and getattr(api_client_cls, "_send_request", None) is send_request_wrapper
+        ):
+            api_client_cls._send_request = send_request_original
+
         _HTTP_PROVIDER_BY_COMPLETIONS.clear()
         _HTTP_PROVIDER_BY_CLIENT.clear()
 

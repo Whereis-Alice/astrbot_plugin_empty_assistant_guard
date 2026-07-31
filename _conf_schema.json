@@ -11,6 +11,12 @@
     "hint": "开启后会轻量 patch ProviderOpenAIOfficial，在请求上游前检查 payloads.messages。",
     "default": true
   },
+  "capture_serialized_http_payload": {
+    "type": "bool",
+    "description": "检查 OpenAI SDK 序列化后的 HTTP payload",
+    "hint": "开启后在 HTTP 请求发送前读取已序列化的 JSON 请求体，只记录消息摘要、字段、大小和哈希，不记录 API Key。用于区分 AstrBot/OpenAI SDK 与 TokenRouter 的转换问题。",
+    "default": true
+  },
   "patch_agent_runner": {
     "type": "bool",
     "description": "发送前移除不合法的空 assistant 消息",
