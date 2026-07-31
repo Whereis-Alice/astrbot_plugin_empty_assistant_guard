@@ -46,6 +46,7 @@ patch_agent_runner = true
 patch_openai_provider = true
 repair_strategy = drop
 drop_orphan_tool_messages = true
+fallback_repair_on_unmatched_api_error = true
 status_model_keywords = kimi,moonshot
 recent_request_limit = 20
 ```
@@ -53,6 +54,8 @@ recent_request_limit = 20
 `repair` 会在请求发给上游前删除无文本、无 `reasoning_content`、无 `tool_calls` 的 assistant 消息。若空 assistant 后面紧跟 `tool` 消息，插件默认会一起删除这些孤立 tool 消息，因为它们通常是丢失了前置 `tool_calls` 的残片。
 
 `status_model_keywords` 只控制 `status` 和 `dump` 显示哪一个模型的最近记录，不会缩小守卫的检测与修复范围。留空可恢复为显示所有模型。
+
+如果上游已经把异常消息清理掉，但仍返回明确的 `Assistant messages must contain text, reasoning content, or tool_calls.`，默认的 `fallback_repair_on_unmatched_api_error` 会在本次请求重试前删除请求副本中的最后一条 `assistant`，并删除其后紧邻的孤立 `tool`。每个请求最多执行一次，不会修改已保存的正常会话历史；关闭该选项即可停用这个兜底。
 
 升级插件不会覆盖 AstrBot 已保存的旧配置。如果状态中仍显示 `provider_action: report_only`，请在插件配置中手动改成 `repair`，否则插件只记录问题，不会自动修复。
 

@@ -1,54 +1,64 @@
-# Changelog
+# 更新日志
+
+## 0.1.7
+
+- 增加无法定位具体空 assistant 时的单次兜底重试。
+- 仅在匹配明确的空 assistant 400 且 `provider_action=repair` 时启用兜底。
+- 从本次请求副本中移除最后一条 assistant，并清理其后紧邻的孤立 tool 消息。
+- 同步修复后的 `context_query`，避免 Provider 重试时重新使用旧消息列表。
+- 每个请求最多执行一次兜底，不修改已保存的正常会话历史。
+- 增加 `fallback_repair_on_unmatched_api_error` 配置项和对应诊断日志。
+- 将本文件全部改为中文。
 
 ## 0.1.6
 
-- Made status prefer the most recent matching Kimi request with an error, repair, or block over a later successful request.
-- Added assistant-message field summaries to API-error dumps, including message index, content, reasoning, tool calls, and function calls.
-- Normalized enum-like message roles and validated the actual contents of tool/function call fields during empty-assistant detection.
+- 状态命令优先显示最近一条发生过错误、修复或拦截的匹配 Kimi 请求，避免被后续成功请求覆盖。
+- API 错误 dump 增加 assistant 消息字段摘要，包括消息索引、content、reasoning、tool_calls 和 function_call。
+- 规范化类似枚举的消息角色，并实际检查工具调用字段内容，减少误判。
 
 ## 0.1.5
 
-- Recorded matching empty-assistant API errors even when the final payload no longer exposed a detectable empty assistant.
-- Added retry-time inspection and repair of `context_query`, which may retain the pre-sanitized messages after AstrBot replaces `payloads["messages"]`.
-- Ran the plugin sanitizer before and after AstrBot's built-in assistant sanitizer.
-- Added `provider_error_count` and `last_provider_error` to status output.
-- Clarified source hints when request hooks mutated context but no empty assistant was found.
+- 即使最终 payload 中已经看不到可识别的空 assistant，也会记录匹配到的空 assistant API 错误。
+- 在重试阶段检查并修复 `context_query`，避免 AstrBot 替换 `payloads["messages"]` 后仍使用未清理的消息。
+- 在 AstrBot 内置 assistant 清理逻辑前后都执行插件检查。
+- 状态命令增加 `provider_error_count` 和 `last_provider_error`。
+- 当 request hook 修改了上下文但没有检测到空 assistant 时，补充更明确的来源提示。
 
 ## 0.1.4
 
-- Added a Runner fallback state when TokenRouter or another provider path does not expose a usable `ProviderRequest` binding.
-- Added provider/model extraction from Runner provider config, `get_model()`, and request model fields.
-- Prevented a stale Gemini state from being reused as the current Kimi request.
-- Added installed-patch status to the diagnostic output so `runner=config:true` is no longer confused with a successfully installed patch.
+- 当 TokenRouter 或其他 Provider 路径没有暴露可用的 `ProviderRequest` 绑定时，增加 Agent Runner 兜底状态。
+- 增加从 Runner Provider 配置、`get_model()` 和请求模型字段中提取模型名的逻辑。
+- 避免把过期的 Gemini 状态误用为当前 Kimi 请求。
+- 在诊断状态中显示 patch 是否实际安装，避免把 `runner=config:true` 误认为 patch 已生效。
 
 ## 0.1.3
 
-- Kept a bounded history of recent LLM requests for each conversation instead of exposing only the last auxiliary-model request.
-- Added `status_model_keywords`, defaulting to `kimi,moonshot`, so `empty_assistant_guard_status` and `empty_assistant_guard_dump` follow the most recent Kimi/Moonshot request.
-- Added `recent_request_limit` for multi-request conversations.
-- Bound runner and late request diagnostics to the exact `ProviderRequest` state when available, avoiding cross-request attribution.
-- Clarified that the Agent Runner guard removes only invalid empty assistant messages and never clears normal conversation context.
-- Added a startup warning when an existing installation still uses `provider_action=report_only`.
+- 为每个会话保留有限数量的最近 LLM 请求，不再只显示最后一次辅助模型请求。
+- 增加 `status_model_keywords`，默认使用 `kimi,moonshot`，让状态和 dump 命令跟随最近的 Kimi/Moonshot 请求。
+- 增加 `recent_request_limit`，用于控制每个会话保留的请求数量。
+- 将 Runner 和后置 request 诊断绑定到准确的 `ProviderRequest` 状态，避免跨请求归因。
+- 明确 Agent Runner 守卫只移除非法的空 assistant，不会清空正常会话上下文。
+- 当旧配置仍使用 `provider_action=report_only` 时，在插件启动时给出警告。
 
 ## 0.1.2
 
-- Added Agent Runner level protection for AstrBot v4.26.8.
-- Patched `ToolLoopAgentRunner._sanitize_contexts_for_provider` so empty assistant messages are removed before any provider request, including TokenRouter and fallback/re-query paths.
-- Patched `ToolLoopAgentRunner._complete_with_assistant_response` to prevent `Message(role="assistant", content=[])` from being saved back into `run_context.messages`.
-- Added the `patch_agent_runner` configuration option, enabled by default.
-- Added plugin version and patch status to `empty_assistant_guard_status`.
+- 增加针对 AstrBot v4.26.8 的 Agent Runner 级保护。
+- patch `ToolLoopAgentRunner._sanitize_contexts_for_provider`，在所有 Provider 请求和重试路径之前移除空 assistant。
+- patch `ToolLoopAgentRunner._complete_with_assistant_response`，阻止 `Message(role="assistant", content=[])` 被保存回 `run_context.messages`。
+- 增加默认开启的 `patch_agent_runner` 配置项。
+- 在 `empty_assistant_guard_status` 中增加插件版本和 patch 状态。
 
 ## 0.1.1
 
-- Changed the default `provider_action` from `report_only` to `repair`.
-- Added a stronger OpenAI-compatible Provider patch for `_sanitize_assistant_messages`.
-- Added retry-time repair for the upstream error: `Assistant messages must contain text, reasoning content, or tool_calls.`
-- Improved provider payload repair so unsafe messages can be fixed before retry.
+- 将 `provider_action` 默认值从 `report_only` 改为 `repair`。
+- 增强 OpenAI 兼容 Provider 的 `_sanitize_assistant_messages` patch。
+- 增加针对 `Assistant messages must contain text, reasoning content, or tool_calls.` 的重试修复。
+- 改进 Provider payload 修复，在重试前处理不安全消息。
 
 ## 0.1.0
 
-- Initial release.
-- Added request, provider payload, Agent context, and tool-event auditing for empty assistant messages.
-- Added `empty_assistant_guard_status` and `empty_assistant_guard_dump` commands.
-- Added optional provider payload actions: `report_only`, `repair`, and `block`.
-- Added repair strategies for dropping empty assistant messages and related orphan tool messages.
+- 首次发布。
+- 增加 request、Provider payload、Agent 上下文和工具事件审计。
+- 增加 `empty_assistant_guard_status` 和 `empty_assistant_guard_dump` 命令。
+- 增加 `report_only`、`repair` 和 `block` 三种可选 Provider payload 处理模式。
+- 增加删除空 assistant 及相关孤立 tool 消息、替换占位文本两种修复策略。

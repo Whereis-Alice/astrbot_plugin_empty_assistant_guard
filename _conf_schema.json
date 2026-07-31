@@ -43,6 +43,12 @@
     "hint": "开启后可避免 provider 重试分支再次使用未修复的消息列表。",
     "default": true
   },
+  "fallback_repair_on_unmatched_api_error": {
+    "type": "bool",
+    "description": "无法定位空 assistant 时删除最后一条 assistant 并重试",
+    "hint": "仅针对明确的空 assistant 400。只修改本次请求副本，不会清空或删除正常会话历史。建议开启。每个请求最多执行一次。",
+    "default": true
+  },
   "assistant_placeholder_text": {
     "type": "string",
     "description": "placeholder 策略使用的占位文本",

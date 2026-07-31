@@ -20,7 +20,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.1.6"
+PLUGIN_VERSION = "0.1.7"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -109,6 +109,7 @@ class AuditState:
     blocked: bool = False
     provider_error: str = ""
     provider_error_count: int = 0
+    fallback_repair_attempted: bool = False
 
 
 class TrackedRequestList(list[Any]):
@@ -184,6 +185,7 @@ class EmptyAssistantGuardPlugin(Star):
         self._last_state_by_session: dict[str, AuditState] = {}
         self._recent_states_by_umo: dict[str, deque[AuditState]] = {}
         self._recent_tools_by_umo: dict[str, deque[ToolTrace]] = {}
+        self._fallback_repair_payload_ids: set[int] = set()
         self._plugin_file = Path(__file__).resolve()
 
     async def initialize(self) -> None:
@@ -632,6 +634,36 @@ class EmptyAssistantGuardPlugin(Star):
                     state.dump_dir,
                 )
 
+        if (
+            not payload_findings
+            and not context_findings
+            and self._provider_action() in {"repair", "fix"}
+            and self._cfg_bool("fallback_repair_on_unmatched_api_error", True)
+            and not self._fallback_repair_was_attempted(state, payloads)
+        ):
+            self._mark_fallback_repair_attempted(state, payloads)
+            fallback = self._fallback_repair_unmatched_payload(
+                state=state,
+                payloads=payloads,
+                context_query=context_query,
+                phase="provider_error_retry",
+            )
+            if fallback:
+                logger.warning(
+                    "[%s] fallback repaired unmatched empty-assistant API error; "
+                    "dropped last assistant from the request copy; retrying",
+                    PLUGIN_ID,
+                )
+                return (
+                    False,
+                    chosen_key,
+                    available_api_keys,
+                    payloads,
+                    context_query,
+                    func_tool,
+                    image_fallback_used,
+                )
+
         changed = self._repair_or_block_payload(
             state=state,
             payloads=payloads,
@@ -655,6 +687,116 @@ class EmptyAssistantGuardPlugin(Star):
             func_tool,
             image_fallback_used,
         )
+
+    def _fallback_repair_was_attempted(
+        self,
+        state: AuditState | None,
+        payloads: dict[str, Any],
+    ) -> bool:
+        if state is not None and state.fallback_repair_attempted:
+            return True
+        return id(payloads) in self._fallback_repair_payload_ids
+
+    def _mark_fallback_repair_attempted(
+        self,
+        state: AuditState | None,
+        payloads: dict[str, Any],
+    ) -> None:
+        if state is not None:
+            state.fallback_repair_attempted = True
+            self._remember_state(state)
+        self._fallback_repair_payload_ids.add(id(payloads))
+
+    def _fallback_repair_unmatched_payload(
+        self,
+        *,
+        state: AuditState | None,
+        payloads: dict[str, Any],
+        context_query: list[Any] | None,
+        phase: str,
+    ) -> bool:
+        payload_messages = payloads.get("messages", []) or []
+        repaired_payload, payload_changes = self._drop_last_assistant_for_fallback(
+            payload_messages,
+            source="payload",
+        )
+        if not payload_changes and isinstance(context_query, list):
+            repaired_payload, payload_changes = self._drop_last_assistant_for_fallback(
+                context_query,
+                source="context_query",
+            )
+
+        if not payload_changes:
+            if state is not None:
+                self._append_dump_event(
+                    state,
+                    f"{phase}_fallback_skipped",
+                    {"reason": "no assistant message exists in payload or context"},
+                )
+            return False
+
+        before_count = len(list(payload_messages or []))
+        payloads["messages"] = repaired_payload
+        changes = list(payload_changes)
+
+        if self._cfg_bool("sync_context_query_after_repair", True) and isinstance(context_query, list):
+            repaired_context, context_changes = self._drop_last_assistant_for_fallback(
+                context_query,
+                source="context_query",
+            )
+            if context_changes:
+                context_query[:] = copy.deepcopy(repaired_context)
+                changes.extend(context_changes)
+            else:
+                context_query[:] = copy.deepcopy(repaired_payload)
+                changes.append("synchronized context_query with repaired payload")
+
+        repair = RepairRecord(
+            phase=phase,
+            action="repair:fallback_last_assistant",
+            before_messages=before_count,
+            after_messages=len(repaired_payload),
+            changes=changes,
+        )
+        if state is not None:
+            state.repairs.append(repair)
+            self._append_dump_event(state, f"{phase}_fallback_repair", asdict(repair))
+            self._record_phase(state, f"{phase}_fallback_repaired", repaired_payload)
+            self._remember_state(state)
+        return True
+
+    def _drop_last_assistant_for_fallback(
+        self,
+        messages: Any,
+        *,
+        source: str,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        original = [copy.deepcopy(self._ensure_message_dict(item)) for item in list(messages or [])]
+        last_assistant = next(
+            (
+                index
+                for index in range(len(original) - 1, -1, -1)
+                if self._normalized_role(original[index].get("role", "")) == "assistant"
+            ),
+            None,
+        )
+        if last_assistant is None:
+            return original, []
+
+        changes = [f"{source}: dropped last assistant at index {last_assistant}"]
+        repaired = original[:last_assistant] + original[last_assistant + 1 :]
+        following_tool_count = 0
+        while (
+            last_assistant < len(repaired)
+            and self._normalized_role(repaired[last_assistant].get("role", "")) == "tool"
+        ):
+            repaired.pop(last_assistant)
+            following_tool_count += 1
+        if following_tool_count:
+            changes.append(
+                f"{source}: dropped {following_tool_count} orphan tool message(s) after last assistant"
+            )
+        return repaired, changes
 
     def _repair_or_block_payload(
         self,
