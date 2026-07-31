@@ -49,12 +49,15 @@ drop_orphan_tool_messages = true
 fallback_repair_on_unmatched_api_error = true
 fallback_repair_max_attempts = 3
 status_model_keywords = kimi,moonshot
+status_only_errors = true
 recent_request_limit = 20
 ```
 
 `repair` 会在请求发给上游前删除无文本、无 `reasoning_content`、无 `tool_calls` 的 assistant 消息。若空 assistant 后面紧跟 `tool` 消息，插件默认会一起删除这些孤立 tool 消息，因为它们通常是丢失了前置 `tool_calls` 的残片。
 
 `status_model_keywords` 只控制 `status` 和 `dump` 显示哪一个模型的最近记录，不会缩小守卫的检测与修复范围。留空可恢复为显示所有模型。
+
+`status_only_errors` 默认开启，状态和 dump 指令只显示发生过 Provider 错误的请求；普通成功请求或只在发送前修复的请求不会覆盖错误记录。关闭后可恢复查看所有发生过异常、修复或拦截的请求。
 
 如果上游已经把异常消息清理掉，但仍返回明确的 `Assistant messages must contain text, reasoning content, or tool_calls.`，默认的 `fallback_repair_on_unmatched_api_error` 会在本次请求重试前逐次删除请求副本中的最近一条 `assistant`，并删除其后紧邻的孤立 `tool`。`fallback_repair_max_attempts` 默认最多尝试 3 次，达到上限后停止，不会修改已保存的正常会话历史；关闭第一个选项即可停用这个兜底。
 

@@ -20,7 +20,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.1.8"
+PLUGIN_VERSION = "0.1.9"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -1095,8 +1095,12 @@ class EmptyAssistantGuardPlugin(Star):
 
     def _state_for_status(self, umo: str) -> AuditState | None:
         keywords = self._status_model_keywords()
+        only_errors = self._cfg_bool("status_only_errors", True)
         if not keywords:
-            return self._last_state_by_umo.get(umo)
+            states = list(reversed(self._recent_states_by_umo.get(umo, ())))
+            if only_errors:
+                return next((state for state in states if self._state_has_provider_error(state)), None)
+            return states[0] if states else self._last_state_by_umo.get(umo)
         states = self._recent_states_by_umo.get(umo, ())
         matching = [
             state
@@ -1104,6 +1108,8 @@ class EmptyAssistantGuardPlugin(Star):
             if state.provider_model
             and any(keyword in state.provider_model.casefold() for keyword in keywords)
         ]
+        if only_errors:
+            return next((state for state in matching if self._state_has_provider_error(state)), None)
         for state in matching:
             if self._state_has_problem(state):
                 return state
@@ -1119,6 +1125,9 @@ class EmptyAssistantGuardPlugin(Star):
             or any(phase.bad_count > 0 for phase in state.phases)
         )
 
+    def _state_has_provider_error(self, state: AuditState) -> bool:
+        return bool(state.provider_error or state.provider_error_count > 0)
+
     def _status_model_keywords(self) -> list[str]:
         raw = self._cfg_str("status_model_keywords", "kimi,moonshot")
         normalized = raw.replace("，", ",").replace(";", ",").replace("；", ",")
@@ -1127,11 +1136,14 @@ class EmptyAssistantGuardPlugin(Star):
     def _missing_status_message(self, umo: str) -> str:
         keywords = self._status_model_keywords()
         if not keywords:
+            if self._cfg_bool("status_only_errors", True):
+                return "EmptyAssistantGuard: 当前会话还没有发生过 Provider 错误的记录。"
             return "EmptyAssistantGuard: 当前会话还没有记录。"
         latest = self._last_state_by_umo.get(umo)
         latest_model = latest.provider_model if latest is not None else PREVIEW_FALLBACK
+        suffix = "错误记录" if self._cfg_bool("status_only_errors", True) else "记录"
         return (
-            "EmptyAssistantGuard: 当前会话还没有匹配模型筛选的记录。\n"
+            f"EmptyAssistantGuard: 当前会话还没有匹配模型筛选的{suffix}。\n"
             f"status_model_filter: {', '.join(keywords)}\n"
             f"latest_overall_model: {latest_model or PREVIEW_FALLBACK}"
         )
@@ -1595,6 +1607,7 @@ class EmptyAssistantGuardPlugin(Star):
             "EmptyAssistantGuard",
             f"version: {PLUGIN_VERSION}",
             f"status_model_filter: {', '.join(self._status_model_keywords()) or 'all'}",
+            f"status_only_errors: {self._cfg_bool('status_only_errors', True)}",
             f"request_id: {state.request_id}",
             f"model: {state.provider_model or PREVIEW_FALLBACK}",
             f"last_phase: {(last_phase.phase if last_phase else PREVIEW_FALLBACK)}",

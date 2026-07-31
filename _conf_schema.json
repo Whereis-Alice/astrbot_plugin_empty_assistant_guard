@@ -107,6 +107,12 @@
     "hint": "多个关键词用英文逗号分隔，模型名包含任一关键词即匹配。默认 kimi,moonshot；留空则显示所有模型的最近请求。只影响 status 和 dump 的显示，不影响其他模型的检测与修复。",
     "default": "kimi,moonshot"
   },
+  "status_only_errors": {
+    "type": "bool",
+    "description": "状态和 dump 指令仅显示发生过 Provider 错误的请求",
+    "hint": "开启后，普通成功请求、仅在发送前修复的请求不会被状态指令选中；默认开启。",
+    "default": true
+  },
   "recent_tool_limit": {
     "type": "int",
     "description": "每个会话保留多少条最近工具事件",
