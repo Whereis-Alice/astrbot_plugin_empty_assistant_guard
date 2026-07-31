@@ -1,0 +1,1 @@
+# astrbot_plugin_empty_assistant_guard
