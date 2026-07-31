@@ -110,6 +110,7 @@ class AuditState:
     provider_error: str = ""
     provider_error_count: int = 0
     fallback_repair_attempted: bool = False
+    fallback_repair_payload_id: int | None = None
 
 
 class TrackedRequestList(list[Any]):
@@ -693,9 +694,10 @@ class EmptyAssistantGuardPlugin(Star):
         state: AuditState | None,
         payloads: dict[str, Any],
     ) -> bool:
-        if state is not None and state.fallback_repair_attempted:
+        payload_id = id(payloads)
+        if state is not None and state.fallback_repair_payload_id == payload_id:
             return True
-        return id(payloads) in self._fallback_repair_payload_ids
+        return payload_id in self._fallback_repair_payload_ids
 
     def _mark_fallback_repair_attempted(
         self,
@@ -704,6 +706,7 @@ class EmptyAssistantGuardPlugin(Star):
     ) -> None:
         if state is not None:
             state.fallback_repair_attempted = True
+            state.fallback_repair_payload_id = id(payloads)
             self._remember_state(state)
         self._fallback_repair_payload_ids.add(id(payloads))
 
