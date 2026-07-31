@@ -1,5 +1,11 @@
 # 更新日志
 
+## 0.2.3
+
+- 修复 OpenAI SDK `AsyncCompletions.create` 包装器丢失原始函数签名的问题；该问题会让 AstrBot 把必填的 `messages` 和 `model` 错误移入 `extra_body`，导致所有 OpenAI 兼容主模型和回退模型一起报错。
+- 增加 Provider 参数元数据自检，可修复热更新前已经缓存成 `args/kwargs` 的 `default_params`。
+- 增加签名保持与旧 Provider 自愈测试，确保诊断 patch 不再改变 Provider 请求结构。
+
 ## 0.2.2
 
 - 当最终 OpenAI 客户端 payload 已确认没有空 assistant 时，默认跳过删除历史 assistant 的盲目兜底，避免重复重试和上下文损坏。

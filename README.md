@@ -87,3 +87,5 @@ recent_request_limit = 20
 ## 兼容性说明
 
 插件使用轻量 monkey patch 观察 `ProviderOpenAIOfficial._prepare_chat_payload` 的最终 payload。卸载或停用插件时会尝试恢复 patch。若同时启用了其他 provider 诊断插件，建议先用 `report_only` 跑一轮确认行为。
+
+0.2.3 起，OpenAI SDK 包装器会保留原始 `create()` 函数签名，并自动修复旧版本 patch 期间 Provider 缓存的参数元数据。若曾出现 `Missing required arguments; Expected either ('messages' and 'model')`，请至少升级到 0.2.3。

@@ -10,6 +10,7 @@ import time
 from collections.abc import Iterable
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.2.2"
+PLUGIN_VERSION = "0.2.3"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -1453,6 +1454,30 @@ class EmptyAssistantGuardPlugin(Star):
             "total_tokens": get_value(usage, "total_tokens", None),
         }
 
+    def _repair_provider_default_params(self, provider: Any) -> None:
+        """Repair signatures cached while AsyncCompletions.create was wrapped."""
+        current = set(getattr(provider, "default_params", ()) or ())
+        if {"messages", "model"}.issubset(current):
+            return
+
+        original = _PATCH_ORIGINALS.get("AsyncCompletions.create")
+        if not callable(original):
+            return
+        try:
+            parameters = inspect.signature(original).parameters.keys()
+        except (TypeError, ValueError):
+            return
+        if not {"messages", "model"}.issubset(parameters):
+            return
+
+        provider.default_params = parameters
+        if not getattr(provider, f"_{PLUGIN_ID}_default_params_repaired", False):
+            setattr(provider, f"_{PLUGIN_ID}_default_params_repaired", True)
+            logger.warning(
+                "[%s] repaired OpenAI provider parameter metadata; restored messages/model",
+                PLUGIN_ID,
+            )
+
     def _find_bad_assistant_messages(self, messages: Any) -> list[MessageFinding]:
         if not isinstance(messages, list):
             try:
@@ -2076,6 +2101,9 @@ class EmptyAssistantGuardPlugin(Star):
                 setattr(provider, f"_{PLUGIN_ID}_current_session_id", "")
 
         async def query_wrapper(provider: Any, *args: Any, **kwargs: Any) -> Any:
+            plugin = _ACTIVE_PLUGIN
+            if plugin is not None:
+                plugin._repair_provider_default_params(provider)
             completions = None
             try:
                 completions = provider.client.chat.completions
@@ -2111,6 +2139,9 @@ class EmptyAssistantGuardPlugin(Star):
                         _HTTP_PROVIDER_BY_CLIENT.pop(id(client), None)
 
         async def query_stream_wrapper(provider: Any, *args: Any, **kwargs: Any):
+            plugin = _ACTIVE_PLUGIN
+            if plugin is not None:
+                plugin._repair_provider_default_params(provider)
             completions = None
             try:
                 completions = provider.client.chat.completions
@@ -2214,8 +2245,10 @@ class EmptyAssistantGuardPlugin(Star):
             from openai.resources.chat.completions import AsyncCompletions
 
             _PATCH_CLASSES["AsyncCompletions"] = AsyncCompletions
-            _PATCH_ORIGINALS["AsyncCompletions.create"] = AsyncCompletions.create
+            original_completions_create = AsyncCompletions.create
+            _PATCH_ORIGINALS["AsyncCompletions.create"] = original_completions_create
 
+            @wraps(original_completions_create)
             async def completions_create_wrapper(
                 completions: Any,
                 *args: Any,
