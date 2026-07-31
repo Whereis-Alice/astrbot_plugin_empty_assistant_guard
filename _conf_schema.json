@@ -49,6 +49,12 @@
     "hint": "仅针对明确的空 assistant 400。只修改本次请求副本，不会清空或删除正常会话历史。建议开启。每个请求最多执行指定次数。",
     "default": true
   },
+  "fallback_repair_when_wire_payload_clean": {
+    "type": "bool",
+    "description": "最终客户端 payload 干净时仍执行盲目兜底轮换",
+    "hint": "默认关闭。若 provider_http_request 已显示 bad_messages=0，继续删除最近 assistant 通常无法修复 TokenRouter 转换问题，只会增加延迟并破坏本次请求副本。仅在需要针对上游序列化问题做实验时开启。",
+    "default": false
+  },
   "fallback_repair_max_attempts": {
     "type": "int",
     "description": "未定位空 assistant 时最多轮换多少条最近 assistant",

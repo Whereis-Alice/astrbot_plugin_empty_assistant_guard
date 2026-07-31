@@ -1,5 +1,11 @@
 # 更新日志
 
+## 0.2.2
+
+- 当最终 OpenAI 客户端 payload 已确认没有空 assistant 时，默认跳过删除历史 assistant 的盲目兜底，避免重复重试和上下文损坏。
+- 增加 `fallback_repair_when_wire_payload_clean` 配置项，只有明确需要测试 TokenRouter 序列化兼容性时才建议开启。
+- 状态和 dump 增加跳过兜底的原因说明。
+
 ## 0.2.1
 
 - 单独记录上游返回的空模型结果（`content=None`、无 reasoning、无 tool_calls），不再把它误判为请求中的空 assistant。

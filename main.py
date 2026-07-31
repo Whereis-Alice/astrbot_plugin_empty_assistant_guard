@@ -20,7 +20,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.2.1"
+PLUGIN_VERSION = "0.2.2"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -115,6 +115,7 @@ class AuditState:
     fallback_repair_attempted: bool = False
     fallback_repair_payload_id: int | None = None
     fallback_repair_attempt_count: int = 0
+    fallback_repair_skipped_clean_payload: bool = False
     wire_request_count: int = 0
     wire_bad_count: int = 0
     wire_message_count: int = 0
@@ -823,6 +824,7 @@ class EmptyAssistantGuardPlugin(Star):
             and not context_findings
             and self._provider_action() in {"repair", "fix"}
             and self._cfg_bool("fallback_repair_on_unmatched_api_error", True)
+            and self._fallback_repair_allowed_for_wire_payload(state)
             and not self._fallback_repair_exhausted(state, payloads)
         ):
             attempt = self._mark_fallback_repair_attempted(state, payloads)
@@ -850,6 +852,31 @@ class EmptyAssistantGuardPlugin(Star):
                     image_fallback_used,
                 )
 
+        if (
+            not payload_findings
+            and not context_findings
+            and self._provider_action() in {"repair", "fix"}
+            and self._cfg_bool("fallback_repair_on_unmatched_api_error", True)
+            and not self._fallback_repair_allowed_for_wire_payload(state)
+            and state is not None
+            and not state.fallback_repair_skipped_clean_payload
+        ):
+            state.fallback_repair_skipped_clean_payload = True
+            self._append_dump_event(
+                state,
+                "provider_error_fallback_skipped",
+                {
+                    "reason": "final OpenAI client payload had no detectable empty assistant",
+                    "hint": "enable fallback_repair_when_wire_payload_clean only for targeted testing",
+                },
+            )
+            self._remember_state(state)
+            logger.warning(
+                "[%s] skipped unmatched fallback because the final OpenAI client payload was clean; "
+                "this avoids deleting valid history and repeated retries",
+                PLUGIN_ID,
+            )
+
         changed = self._repair_or_block_payload(
             state=state,
             payloads=payloads,
@@ -873,6 +900,11 @@ class EmptyAssistantGuardPlugin(Star):
             func_tool,
             image_fallback_used,
         )
+
+    def _fallback_repair_allowed_for_wire_payload(self, state: AuditState | None) -> bool:
+        if state is None or not state.wire_request_count or state.wire_bad_count:
+            return True
+        return self._cfg_bool("fallback_repair_when_wire_payload_clean", False)
 
     def _fallback_repair_max_attempts(self) -> int:
         return max(1, min(self._cfg_int("fallback_repair_max_attempts", 3), 10))
@@ -1914,6 +1946,8 @@ class EmptyAssistantGuardPlugin(Star):
                 "fallback_repair_attempts: "
                 f"{state.fallback_repair_attempt_count}/{self._fallback_repair_max_attempts()}"
             )
+        if state.fallback_repair_skipped_clean_payload:
+            lines.append("fallback_repair_skipped: final OpenAI client payload was clean")
         lines.append(f"dump: {state.dump_dir}")
         return "\n".join(lines)
 
