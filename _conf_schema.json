@@ -1,0 +1,207 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "启用插件",
+    "hint": "关闭后不再记录请求，也不再修复或拦截 provider payload。",
+    "default": true
+  },
+  "patch_openai_provider": {
+    "type": "bool",
+    "description": "检查 OpenAI 兼容 Provider 最终 payload",
+    "hint": "开启后会轻量 patch ProviderOpenAIOfficial，在请求上游前检查 payloads.messages。",
+    "default": true
+  },
+  "capture_serialized_http_payload": {
+    "type": "bool",
+    "description": "检查 OpenAI SDK 序列化后的 HTTP payload",
+    "hint": "开启后在 HTTP 请求发送前读取已序列化的 JSON 请求体，只记录消息摘要、字段、大小和哈希，不记录 API Key。用于区分 AstrBot/OpenAI SDK 与 TokenRouter 的转换问题。",
+    "default": true
+  },
+  "repair_serialized_http_payload": {
+    "type": "bool",
+    "description": "发送前修复序列化 HTTP payload",
+    "hint": "实验性选项。只对匹配模型的最终 JSON 生效；Kimi/Moonshot 的空正文调用 assistant 会删除，其他模型按 serialized_payload_repair_mode 处理。默认关闭，优先使用请求前清理。",
+    "default": false
+  },
+  "serialized_payload_repair_mode": {
+    "type": "string",
+    "description": "序列化 payload 空 assistant 的修复方式",
+    "hint": "space=普通兼容模型保留 tool_calls 并给空 content 补一个空格；drop=删除空 assistant。匹配 Kimi/Moonshot 的空正文调用 assistant 始终删除。",
+    "default": "space",
+    "enum": ["space", "drop"]
+  },
+  "serialized_payload_repair_model_keywords": {
+    "type": "string",
+    "description": "序列化 payload 修复的模型筛选",
+    "hint": "模型名包含任一关键词才会修改最终请求。多个关键词用英文逗号分隔，默认只匹配 kimi、moonshot；留空表示匹配全部模型。",
+    "default": "kimi,moonshot"
+  },
+  "patch_agent_runner": {
+    "type": "bool",
+    "description": "发送前移除不合法的空 assistant 消息",
+    "hint": "建议开启。会在 Agent Runner 请求前移除普通空 assistant；带 tool_calls 的空正文由 repair_empty_assistant_with_tool_calls 单独控制；不会清空正常对话上下文。",
+    "default": true
+  },
+  "repair_empty_assistant_with_tool_calls": {
+    "type": "bool",
+    "description": "清理带工具调用但正文为空的 assistant",
+    "hint": "Kimi/Moonshot 可能拒绝 content 为空但带 tool_calls 的 assistant。开启后会在 Runner 和 Provider 请求前删除该 assistant，并删除其后孤立的 tool；只修改本次请求副本。",
+    "default": true
+  },
+  "empty_assistant_tool_calls_model_keywords": {
+    "type": "string",
+    "description": "带工具调用空 assistant 的模型筛选",
+    "hint": "模型名包含任一关键词才执行这项兼容性清理。多个关键词用英文逗号分隔，默认 kimi,moonshot；留空表示匹配全部已知模型。",
+    "default": "kimi,moonshot"
+  },
+  "provider_action": {
+    "type": "string",
+    "description": "发现空 assistant 后的处理方式",
+    "hint": "repair=发送前自动修复，推荐；report_only=只记录不修复；block=阻止本次请求并给出 dump 路径。",
+    "default": "repair",
+    "enum": ["report_only", "repair", "block"]
+  },
+  "repair_strategy": {
+    "type": "string",
+    "description": "修复策略",
+    "hint": "drop=删除空 assistant；placeholder=替换为空消息占位文本。通常推荐 drop。",
+    "default": "drop",
+    "enum": ["drop", "placeholder"]
+  },
+  "drop_orphan_tool_messages": {
+    "type": "bool",
+    "description": "修复时删除孤立 tool 消息",
+    "hint": "当空 assistant 后面紧跟 tool 消息时，通常代表 assistant 的 tool_calls 丢了；保留这些 tool 消息可能引发下一类 400。",
+    "default": true
+  },
+  "sync_context_query_after_repair": {
+    "type": "bool",
+    "description": "修复后同步 provider 内部 context_query",
+    "hint": "开启后可避免 provider 重试分支再次使用未修复的消息列表。",
+    "default": true
+  },
+  "fallback_repair_on_unmatched_api_error": {
+    "type": "bool",
+    "description": "无法定位空 assistant 时删除最后一条 assistant 并重试",
+    "hint": "仅针对明确的空 assistant 400。Kimi/Moonshot 的请求前兼容清理默认不会再盲目轮换已干净的 payload；只修改本次请求副本，不会清空正常会话历史。",
+    "default": true
+  },
+  "fallback_repair_when_wire_payload_clean": {
+    "type": "bool",
+    "description": "最终客户端 payload 干净时仍执行盲目兜底轮换",
+    "hint": "默认关闭。若 provider_http_request 已显示 bad_messages=0，继续删除最近 assistant 通常无法修复 TokenRouter 转换问题，只会增加延迟并破坏本次请求副本。仅在需要针对上游序列化问题做实验时开启。",
+    "default": false
+  },
+  "fallback_repair_max_attempts": {
+    "type": "int",
+    "description": "未定位空 assistant 时最多轮换多少条最近 assistant",
+    "hint": "每次重试只移除一条最近 assistant 及其紧邻的孤立 tool。默认 3 次，最多 10 次；达到上限后停止，避免继续删除上下文。",
+    "default": 3,
+    "min": 1,
+    "max": 10
+  },
+  "assistant_placeholder_text": {
+    "type": "string",
+    "description": "placeholder 策略使用的占位文本",
+    "default": "[Empty assistant message removed before provider request.]"
+  },
+  "inspect_agent_context": {
+    "type": "bool",
+    "description": "检查 Agent 开始/结束时的 run_context.messages",
+    "hint": "用于判断空 assistant 是否已经存在于会话历史或 Agent 保存前状态。",
+    "default": true
+  },
+  "inspect_request_context": {
+    "type": "bool",
+    "description": "检查 ProviderRequest.contexts",
+    "hint": "用于定位 on_llm_request hook 阶段前后是否出现空 assistant。",
+    "default": true
+  },
+  "capture_hook_diffs": {
+    "type": "bool",
+    "description": "记录每个 request hook 前后的上下文差异",
+    "hint": "开启后会标出具体插件 handler 是否修改了 contexts，以及是否首次引入空 assistant。只记录摘要和预览。",
+    "default": true
+  },
+  "record_tool_events": {
+    "type": "bool",
+    "description": "记录最近的 LLM 工具调用",
+    "hint": "用于把空 assistant 与最近执行的工具、工具所属插件、工具结果是否为空关联起来。",
+    "default": true
+  },
+  "mark_empty_agent_messages_no_save": {
+    "type": "bool",
+    "description": "Agent 结束时标记空 assistant 不入历史",
+    "hint": "实验性选项。开启后会给 run_context.messages 中的空 assistant 设置 _no_save=True，避免污染后续历史。",
+    "default": false
+  },
+  "remember_last_sessions": {
+    "type": "int",
+    "description": "内存中保留多少个会话的最近记录",
+    "default": 50,
+    "min": 0,
+    "max": 200
+  },
+  "recent_request_limit": {
+    "type": "int",
+    "description": "每个会话保留多少次最近模型请求",
+    "hint": "同一条消息可能依次调用主模型、工具模型和表情包判断模型。保留多次请求后，状态命令才能找到最近一次 Kimi 请求而不被后续 DeepSeek 请求覆盖。",
+    "default": 20,
+    "min": 1,
+    "max": 100
+  },
+  "status_model_keywords": {
+    "type": "string",
+    "description": "状态命令只显示哪些模型",
+    "hint": "多个关键词用英文逗号分隔，模型名包含任一关键词即匹配。默认 kimi,moonshot；留空则显示所有模型的最近请求。只影响 status 和 dump 的显示，不影响其他模型的检测与修复。",
+    "default": "kimi,moonshot"
+  },
+  "status_only_errors": {
+    "type": "bool",
+    "description": "状态和 dump 指令仅显示发生过 Provider 错误的请求",
+    "hint": "开启后，普通成功请求、仅在发送前修复的请求不会被状态指令选中；默认开启。",
+    "default": true
+  },
+  "recent_tool_limit": {
+    "type": "int",
+    "description": "每个会话保留多少条最近工具事件",
+    "default": 12,
+    "min": 1,
+    "max": 50
+  },
+  "detail_preview_limit": {
+    "type": "int",
+    "description": "dump 摘要中保留多少条消息预览",
+    "default": 8,
+    "min": 1,
+    "max": 30
+  },
+  "preview_chars": {
+    "type": "int",
+    "description": "文本预览最大字符数",
+    "default": 160,
+    "min": 32,
+    "max": 1000
+  },
+  "tool_preview_chars": {
+    "type": "int",
+    "description": "工具参数和结果预览最大字符数",
+    "default": 240,
+    "min": 32,
+    "max": 2000
+  },
+  "status_finding_limit": {
+    "type": "int",
+    "description": "状态命令中最多显示多少条异常消息",
+    "default": 3,
+    "min": 1,
+    "max": 10
+  },
+  "status_tool_limit": {
+    "type": "int",
+    "description": "状态命令中最多显示多少个最近工具事件",
+    "default": 4,
+    "min": 0,
+    "max": 12
+  }
+}

@@ -1,0 +1,13 @@
+name: astrbot_plugin_empty_assistant_guard
+display_name: 空 Assistant 消息守卫
+version: 0.2.8
+author: Whereis-Alice
+desc: 定位并可选修复 OpenAI 兼容请求中的空 assistant 消息，辅助排查 Kimi/TokenRouter 400 报错来源。
+short_desc: 空 assistant 消息诊断与兜底修复
+astrbot_version: ">=4.16,<5"
+repo: https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard
+tags:
+  - debug
+  - provider
+  - agent
+  - tools
