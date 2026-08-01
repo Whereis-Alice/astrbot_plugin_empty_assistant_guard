@@ -22,7 +22,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.2.9"
+PLUGIN_VERSION = "0.2.10"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -1175,7 +1175,7 @@ class EmptyAssistantGuardPlugin(Star):
                     "dropped last assistant from the request copy; attempt=%s/%s; retrying",
                     PLUGIN_ID,
                     attempt,
-                    self._fallback_repair_max_attempts(),
+                    self._fallback_repair_max_attempts(error_model),
                 )
                 return (
                     False,
@@ -1237,12 +1237,21 @@ class EmptyAssistantGuardPlugin(Star):
         )
 
     def _fallback_repair_allowed_for_wire_payload(self, state: AuditState | None) -> bool:
+        if state is not None and self._empty_call_assistant_is_unsafe(
+            state.provider_error_model or state.provider_model
+        ):
+            # Kimi/TokenRouter can reject a transformed payload that looked clean
+            # before serialization; keep the proven 0.1.8 fallback for this case.
+            return True
         if state is None or not state.wire_request_count or state.wire_bad_count:
             return True
         return self._cfg_bool("fallback_repair_when_wire_payload_clean", False)
 
-    def _fallback_repair_max_attempts(self) -> int:
-        return max(1, min(self._cfg_int("fallback_repair_max_attempts", 3), 10))
+    def _fallback_repair_max_attempts(self, model: str = "") -> int:
+        attempts = max(1, min(self._cfg_int("fallback_repair_max_attempts", 3), 10))
+        if self._empty_call_assistant_is_unsafe(model):
+            return min(attempts, 3)
+        return attempts
 
     def _fallback_repair_attempt_count(
         self,
@@ -1259,7 +1268,13 @@ class EmptyAssistantGuardPlugin(Star):
         state: AuditState | None,
         payloads: dict[str, Any],
     ) -> bool:
-        return self._fallback_repair_attempt_count(state, payloads) >= self._fallback_repair_max_attempts()
+        model = str(
+            payloads.get("model")
+            or (state.provider_error_model if state is not None else "")
+            or (state.provider_model if state is not None else "")
+            or ""
+        )
+        return self._fallback_repair_attempt_count(state, payloads) >= self._fallback_repair_max_attempts(model)
 
     def _mark_fallback_repair_attempted(
         self,
@@ -2428,7 +2443,7 @@ class EmptyAssistantGuardPlugin(Star):
         if state.fallback_repair_attempted:
             lines.append(
                 "fallback_repair_attempts: "
-                f"{state.fallback_repair_attempt_count}/{self._fallback_repair_max_attempts()}"
+                f"{state.fallback_repair_attempt_count}/{self._fallback_repair_max_attempts(state.provider_error_model or state.provider_model)}"
             )
         if state.fallback_repair_skipped_clean_payload:
             lines.append("fallback_repair_skipped: final OpenAI client payload was clean")

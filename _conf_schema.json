@@ -83,13 +83,13 @@
   "fallback_repair_on_unmatched_api_error": {
     "type": "bool",
     "description": "无法定位空 assistant 时删除最后一条 assistant 并重试",
-    "hint": "仅针对明确的空 assistant 400。请求前清理会先执行；若最终 HTTP payload 已确认干净则默认跳过盲目轮换，否则保留 0.1.8 起的有限次删除最近 assistant 兜底。只修改本次请求副本，不会清空正常会话历史。",
+    "hint": "仅针对明确的空 assistant 400。请求前清理会先执行；Kimi/Moonshot 即使本地 payload 已确认干净也保留 0.1.8 起的有限次删除最近 assistant 兜底，最多 3 次。只修改本次请求副本，不会清空正常会话历史。",
     "default": true
   },
   "fallback_repair_when_wire_payload_clean": {
     "type": "bool",
     "description": "最终客户端 payload 干净时仍执行盲目兜底轮换",
-    "hint": "默认关闭。若 provider_http_request 已显示 bad_messages=0，继续删除最近 assistant 通常无法修复 TokenRouter 转换问题，只会增加延迟并破坏本次请求副本。仅在需要针对上游序列化问题做实验时开启。",
+    "hint": "默认关闭。普通模型若 provider_http_request 已显示 bad_messages=0，继续删除最近 assistant 只会增加延迟；Kimi/Moonshot 为兼容已验证的 0.1.8 行为，会自动保留有限次兜底。",
     "default": false
   },
   "fallback_repair_max_attempts": {

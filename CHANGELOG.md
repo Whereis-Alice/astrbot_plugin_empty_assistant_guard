@@ -1,5 +1,10 @@
 # 更新日志
 
+## 0.2.10
+
+- Kimi/Moonshot 在本地 payload 干净但上游仍返回空 assistant 400 时，恢复 0.1.8 的有限次 fallback；最多 3 次，避免旧配置中的 10 次重试拖慢响应。
+- 普通模型继续遵守 `fallback_repair_when_wire_payload_clean`，不扩大盲目删除范围。
+
 ## 0.2.9
 
 - 保留 0.1.8 起验证有效的有限次删除最近 assistant 兜底；请求前兼容清理优先执行，只有无法定位问题且没有确认最终 payload 干净时才进入兜底重试。
