@@ -83,7 +83,7 @@
   "fallback_repair_on_unmatched_api_error": {
     "type": "bool",
     "description": "无法定位空 assistant 时删除最后一条 assistant 并重试",
-    "hint": "仅针对明确的空 assistant 400。Kimi/Moonshot 的请求前兼容清理默认不会再盲目轮换已干净的 payload；只修改本次请求副本，不会清空正常会话历史。",
+    "hint": "仅针对明确的空 assistant 400。请求前清理会先执行；若最终 HTTP payload 已确认干净则默认跳过盲目轮换，否则保留 0.1.8 起的有限次删除最近 assistant 兜底。只修改本次请求副本，不会清空正常会话历史。",
     "default": true
   },
   "fallback_repair_when_wire_payload_clean": {

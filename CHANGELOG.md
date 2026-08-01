@@ -1,12 +1,17 @@
 # 更新日志
 
+## 0.2.9
+
+- 保留 0.1.8 起验证有效的有限次删除最近 assistant 兜底；请求前兼容清理优先执行，只有无法定位问题且没有确认最终 payload 干净时才进入兜底重试。
+- 修正 0.2.8 对 Kimi 兜底限制过严的问题，避免请求前清理未捕获时直接失去已验证的恢复路径。
+
 ## 0.2.8
 
 - 请求发出前将 Kimi/Moonshot 的“正文为空但带 `tool_calls` 或 `function_call`”视为不兼容 assistant。
 - 在 Agent Runner、Provider payload 和最终 HTTP JSON 三层提前删除问题 assistant，并按原有规则清理其后孤立的 `tool` 消息，避免等 400 后反复重试。
 - 新增 `repair_empty_assistant_with_tool_calls` 和 `empty_assistant_tool_calls_model_keywords` 配置项；只修改本次请求副本，不改写已保存会话历史。
 - 最终 HTTP payload 的 `space` 模式对匹配的 Kimi/Moonshot 请求改为删除，不再依赖补空格规避校验。
-- 对已启用请求前兼容清理且最终 payload 干净的 Kimi/Moonshot 请求，默认跳过无法定位问题时的盲目 fallback 轮换；需要排查序列化问题时再开启 `fallback_repair_when_wire_payload_clean`。
+- 对最终 payload 已确认干净的请求，默认跳过无法定位问题时的盲目 fallback 轮换；需要排查序列化问题时再开启 `fallback_repair_when_wire_payload_clean`。
 
 ## 0.2.7
 

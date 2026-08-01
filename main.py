@@ -22,7 +22,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 PLUGIN_ID = "astrbot_plugin_empty_assistant_guard"
-PLUGIN_VERSION = "0.2.8"
+PLUGIN_VERSION = "0.2.9"
 PLUGIN_DESC = "定位并可选修复 OpenAI 兼容请求中的空 assistant 消息"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_empty_assistant_guard"
 
@@ -1238,16 +1238,7 @@ class EmptyAssistantGuardPlugin(Star):
 
     def _fallback_repair_allowed_for_wire_payload(self, state: AuditState | None) -> bool:
         if state is None or not state.wire_request_count or state.wire_bad_count:
-            if state is None:
-                return True
-            model = state.provider_error_model or state.provider_model
-            if self._empty_call_assistant_is_unsafe(model):
-                return self._cfg_bool("fallback_repair_when_wire_payload_clean", False)
             return True
-        if self._empty_call_assistant_is_unsafe(
-            state.provider_error_model or state.provider_model
-        ):
-            return self._cfg_bool("fallback_repair_when_wire_payload_clean", False)
         return self._cfg_bool("fallback_repair_when_wire_payload_clean", False)
 
     def _fallback_repair_max_attempts(self) -> int:

@@ -82,7 +82,7 @@ recent_request_limit = 20
 
 当日志显示 `bad_messages=0` 但仍匹配到空 assistant 400 时，0.2.2 默认不会再删除最近的正常 assistant 并反复重试。`fallback_repair_when_wire_payload_clean` 仅用于针对 TokenRouter 序列化问题做实验，普通使用应保持关闭。
 
-如果上游已经把异常消息清理掉，但仍返回明确的 `Assistant messages must contain text, reasoning content, or tool_calls.`，普通模型可使用 `fallback_repair_on_unmatched_api_error` 兜底删除请求副本中的最近一条 `assistant` 及其后紧邻的孤立 `tool`。对启用了 Kimi/Moonshot 请求前兼容清理的模型，默认会跳过这种无法定位问题时的盲目轮换，避免 `1/10、2/10` 这类重试拖慢响应；只有显式开启 `fallback_repair_when_wire_payload_clean` 才会继续实验。关闭第一个选项也可完全停用兜底。
+如果上游已经把异常消息清理掉，但仍返回明确的 `Assistant messages must contain text, reasoning content, or tool_calls.`，`fallback_repair_on_unmatched_api_error` 会保留 0.1.8 起的有效兜底：删除请求副本中的最近一条 `assistant` 及其后紧邻的孤立 `tool`，再有限次重试。请求前清理会优先执行；如果最终 HTTP payload 已确认干净，默认仍跳过盲目轮换，避免 `1/10、2/10` 这类重试拖慢响应。只有排查 TokenRouter 序列化问题时才开启 `fallback_repair_when_wire_payload_clean`，关闭 `fallback_repair_on_unmatched_api_error` 可完全停用兜底。
 
 升级插件不会覆盖 AstrBot 已保存的旧配置。如果状态中仍显示 `provider_action: report_only`，请在插件配置中手动改成 `repair`，否则插件只记录问题，不会自动修复。
 
